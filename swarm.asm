@@ -6,12 +6,12 @@
 ;
 ; Engine summary
 ;   - MODE 2: 160x256, 16 colours, 4 bits per pixel, 2 pixels per byte, screen &3000-&7FFF
-;   - Positions are in pixels. Every sprite (up to 10 pixels wide) is stored pre-shifted
-;     twice (one copy per pixel offset inside a byte), so it is 6 bytes wide on screen
-;     and can sit at any x, not just every 2nd pixel.
+;   - Positions are in pixels. Every sprite (up to ALIEN_W pixels wide) is stored pre-shifted
+;     twice (one copy per pixel offset inside a byte), so it is up to SPR_BYTES bytes wide
+;     on screen and can sit at any x, not just every 2nd pixel.
 ;   - Sprites are drawn with EOR (XOR). Drawing the same image twice erases it.
 ;   - A sprite that slides one pixel sideways is moved with a single "delta" image
-;     (old image EOR new image, also 6 bytes wide). Each screen byte changes once, straight
+;     (old image EOR new image, also up to SPR_BYTES bytes wide). Each screen byte changes once, straight
 ;     from the old picture to the new one, so the sprite never vanishes mid-frame.
 ;   - Beam chasing: User VIA timer 2 restarts at vsync, so the code knows which scan
 ;     line the CRT is drawing. Objects are redrawn top to bottom, each one just after
@@ -80,7 +80,10 @@ CROSS_OFS    = 9              ; delta id of "frame id at x -> other frame at x +
 VERT_OFS     = 15             ; delta id of "frame id at y -> same frame at y + 1"
 DOWN_OFS     = 21             ; delta id of "frame id at (x, y) -> same at (x + 1, y + 1)"
 UP_OFS       = 27             ; delta id of "frame id at (x, y + 1) -> same at (x + 1, y)"
-SPR_BYTES    = 6              ; the widest image or delta, in byte columns
+ALIEN_W      = 10             ; every alien image is this many pixels wide and high
+ALIEN_H      = 8
+ALIEN_MID    = ALIEN_W DIV 2 - 1    ; an alien's middle column: it fires from here
+SPR_BYTES    = (ALIEN_W + 1) DIV 2 + 1  ; the widest image or delta (an alien delta), in byte columns
 
 PULSE_COLOUR = 2              ; logical colour of the flagships' yellow
 STAR_COLOUR  = 8              ; the star bit: added to a sprite colour, it changes nothing
@@ -95,7 +98,8 @@ STAR_BAND    = 48             ; stars above this row (or about to wrap to the to
 FLAP_MASK    = 4              ; a row flaps on steps where frame AND FLAP_MASK = 0
 
 PLAYER_Y     = 232            ; top row of the player's ship
-PLAYER_MAX_X = 148            ; a sprite at x covers bytes x DIV 2 .. x DIV 2 + 5
+PLAYER_MAX_X = 148            ; the right limit for the ship and the aliens
+ASSERT PLAYER_MAX_X + ALIEN_W <= 160    ; an alien there still fits on screen
 
 FORM_COLS    = 6
 FORM_ROWS    = 4
@@ -103,13 +107,14 @@ FORM_COUNT   = FORM_COLS * FORM_ROWS
 FORM_INSET   = "2100"         ; empty columns at each end of each row: 2, 4, 6, 6 aliens
 WAVE_COUNT   = FORM_COUNT - 2 * (VAL(MID$(FORM_INSET, 1, 1)) + VAL(MID$(FORM_INSET, 2, 1)) + VAL(MID$(FORM_INSET, 3, 1)) + VAL(MID$(FORM_INSET, 4, 1)))
 FORM_Y       = 32             ; top pixel row of the formation
-COL_STEP     = 14             ; pixels between formation columns
-ROW_STEP     = 12             ; pixel rows between formation rows
+COL_STEP     = ALIEN_W + 4    ; pixels between formation columns
+ROW_STEP     = ALIEN_H + 4    ; pixel rows between formation rows
 BREATH_MAX   = 8              ; the outer columns move out this far as the formation breathes
 VBREATH_MAX  = 3              ; and the top and bottom rows this far
 FX_START     = 40
 FX_MIN       = 4 + BREATH_MAX
 FX_MAX       = PLAYER_MAX_X - (FORM_COLS - 1) * COL_STEP - BREATH_MAX
+ASSERT FX_MIN < FX_START AND FX_START < FX_MAX    ; or the sway never turns
 
 LEVELS       = 4              ; waves 1, 2, 3 and 4 on: see the level tables
 RUSH_COUNT   = 4              ; this few aliens left: they dive almost non-stop
@@ -153,7 +158,7 @@ DIVER_RETURN = 2
 ; ---------------------------------------------------------------- zero page (&40-&71)
 ; &00-&8F belongs to the current language; Swarm never returns to BASIC.
 ptr0         = &40            ; 2: screen address of sprite byte column 0 (cell row 0)
-                              ; ptr1-ptr5 follow: ptr0 + 8 * n, byte column n
+                              ; ptr1.. follow, SPR_BYTES in all: ptr0 + 8 * n, byte column n
 draw_x       = &4C            ; plotter inputs: pixel x, pixel y, sprite id
 draw_y       = &4D
 draw_id      = &4E
@@ -196,6 +201,7 @@ rnd          = &73            ; random byte, never 0: see random
 ptr1         = ptr0 + 2
 ptr2         = ptr0 + 4
 ptr3         = ptr0 + 6
+ASSERT ptr0 + 2 * SPR_BYTES <= draw_x
 
 ; ---------------------------------------------------------------- run-time state
 ; The language workspace: Swarm never returns to BASIC. Nothing here is saved to disc.
@@ -480,7 +486,7 @@ NEXT
     CMP row_y0,X : BEQ dr_next      ; landed
     STA draw_y
     LDA row_spr,X : ORA row_anim,X : CLC : ADC #VERT_OFS : STA draw_id
-    LDA #8 : JSR uf_guard_h         ; old and new rows: 9 high
+    LDA #ALIEN_H : JSR uf_guard_h   ; old and new rows: ALIEN_H + 1 high
 .dr_col
     LDX loop_i
     LDA alive,X : BEQ dr_col_next
@@ -807,21 +813,21 @@ NEXT
     JMP plot_image
 
 .kill_bullet
-    LDA bullet_y : LDX bullet_y : JSR beam_guard_8
+    LDA bullet_y : LDX bullet_y : JSR beam_guard_alien
     JSR draw_bullet
     LDA #0 : STA bullet_on
     RTS
 
-; The bullet is 2 pixels wide and 4 rows tall. It overlaps a 10x8 alien at (ax, ay)
-; when bullet_x - ax is -1..9 and bullet_y - ay is -3..7.
+; The bullet is 2 pixels wide and 4 rows tall. It overlaps an alien at (ax, ay)
+; when bullet_x - ax is -1..ALIEN_W - 1 and bullet_y - ay is -3..ALIEN_H - 1.
 .check_bullet_hits
     LDA diver_state : BEQ cbh_form
     LDA bullet_x : SEC : SBC diver_x : CLC : ADC #1
-    CMP #11 : BCS cbh_form
+    CMP #ALIEN_W + 1 : BCS cbh_form
     LDA bullet_y : SEC : SBC diver_y : CLC : ADC #3
-    CMP #11 : BCS cbh_form
+    CMP #ALIEN_H + 3 : BCS cbh_form
     JSR kill_bullet
-    LDA diver_y : LDX diver_y : JSR beam_guard_8
+    LDA diver_y : LDX diver_y : JSR beam_guard_alien
     JSR draw_diver                  ; erase
     LDX diver_slot : LDA #ALIVE_GONE : STA alive,X
     STA diver_state : STA diver_wrap
@@ -829,11 +835,11 @@ NEXT
     LDA #&05 : JMP add_score        ; 50 points (BCD, HUD adds a trailing 0)
 
 .cbh_form
-    ; the row whose aliens the bullet's rows overlap: bullet_y + 3 - row_y is 0..10
+    ; the row whose aliens the bullet's rows overlap: bullet_y + 3 - row_y is 0..ALIEN_H + 2
     LDX #FORM_ROWS - 1
 .cbh_row
     LDA bullet_y : CLC : ADC #3 : SEC : SBC row_y,X
-    CMP #11 : BCC cbh_rowok
+    CMP #ALIEN_H + 3 : BCC cbh_rowok
     DEX : BPL cbh_row
     RTS
 .cbh_rowok
@@ -843,14 +849,14 @@ NEXT
     LDA alive,X : CMP #ALIVE_HOME : BNE cbh_next
     JSR slot_pos
     LDA bullet_x : CLC : ADC #1 : SEC : SBC slot_x
-    CMP #11 : BCC cbh_hit
+    CMP #ALIEN_W + 1 : BCC cbh_hit
 .cbh_next
     INX : LDA slot_col,X : BNE cbh_col
     RTS
 .cbh_hit
     STX loop_i
     JSR kill_bullet
-    LDX loop_i : JSR slot_pos : LDA slot_y : TAX : JSR beam_guard_8
+    LDX loop_i : JSR slot_pos : LDA slot_y : TAX : JSR beam_guard_alien
     LDX loop_i
     JSR draw_slot                   ; erase the alien
     LDX loop_i : LDA #ALIVE_GONE : STA alive,X
@@ -859,13 +865,13 @@ NEXT
 .cbh_none
     RTS
 
-; beam_guard for an 8-row object: A = top row of one position, X = top row of another.
-.beam_guard_8
+; beam_guard for an alien-high object: A = top row of one position, X = top row of another.
+.beam_guard_alien
     STX tmp
     CMP tmp : BCC bg8_ordered       ; A < X
     TAX : LDA tmp
 .bg8_ordered
-    PHA : TXA : CLC : ADC #7 : TAX : PLA
+    PHA : TXA : CLC : ADC #ALIEN_H - 1 : TAX : PLA
     JMP beam_guard
 
 ; ======================================================================================
@@ -882,7 +888,7 @@ NEXT
     LDX level
     LDA diver_y : CMP afire_tops,X : BCC af_done
     LDA afire_ranges,X : ASL A : STA tmp
-    LDA diver_x : SEC : SBC player_x : SEC : SBC #2  ; middles: x + 4 and x + 6
+    LDA diver_x : SEC : SBC player_x : SEC : SBC #(6 - ALIEN_MID) AND &FF  ; middles: x + ALIEN_MID and x + 6
     CLC : ADC afire_ranges,X
     CMP tmp : BEQ af_near : BCS af_done
 .af_near
@@ -892,9 +898,9 @@ NEXT
 .af_burst
     DEC burst_gap : BNE af_done
     LDA #BURST_GAP : STA burst_gap
-    LDA diver_y : CLC : ADC #8 : STA afire_y
+    LDA diver_y : CLC : ADC #ALIEN_H : STA afire_y
     CMP #AFIRE_LOW + 1 : BCS af_end ; too close: the rest of the burst is lost
-    LDA diver_x : CLC : ADC #4 : STA afire_x      ; under its middle
+    LDA diver_x : CLC : ADC #ALIEN_MID : STA afire_x  ; under its middle
     INC afire_req
     DEC burst_left
 .af_done
@@ -1023,7 +1029,7 @@ NEXT
     LDY new_y : BPL uf_bguard
     STA draw_y                      ; moving up: the deltas start at the new y
 .uf_bguard
-    LDA #8 : JSR uf_guard_h         ; old and new rows: 9 high
+    LDA #ALIEN_H : JSR uf_guard_h   ; old and new rows: ALIEN_H + 1 high
 .uf_bcol
     LDX loop_i
     LDA alive,X : CMP #ALIVE_HOME : BNE uf_bnext
@@ -1059,7 +1065,7 @@ NEXT
 
 ; Wait for the beam to pass the row; loop_i = its first slot.
 .uf_guard
-    LDA #7
+    LDA #ALIEN_H - 1
 .uf_guard_h                         ; A = height - 1
     CLC : ADC draw_y : TAX : LDA draw_y
     JSR beam_guard
@@ -1202,7 +1208,7 @@ NEXT
 .ud_rleft
     DEC new_x
 .ud_move
-    LDA diver_y : LDX new_y : JSR beam_guard_8
+    LDA diver_y : LDX new_y : JSR beam_guard_alien
     JSR draw_diver                  ; erase
     LDA new_x : STA diver_x
     LDA new_y : STA diver_y
@@ -1245,9 +1251,9 @@ NEXT
 ; A diving alien that reaches the ship costs a life and flies home from the top.
 .check_player_hit
     LDA diver_state : CMP #DIVER_DIVE : BNE cph_none
-    LDA diver_y : CMP #PLAYER_Y - 7 : BCC cph_none
-    LDA diver_x : SEC : SBC player_x : CLC : ADC #9   ; 10-wide alien, 8-wide ship
-    CMP #17 : BCS cph_none
+    LDA diver_y : CMP #PLAYER_Y - ALIEN_H + 1 : BCC cph_none
+    LDA diver_x : SEC : SBC player_x : CLC : ADC #ALIEN_W - 1   ; 8-wide ship
+    CMP #ALIEN_W + 7 : BCS cph_none
     LDA #DIVER_RETURN : STA diver_state
     INC diver_wrap
     DEC lives
@@ -1341,7 +1347,7 @@ NEXT
     RTS
 PL_COL0 = pl_col + 7 * (SPR_BYTES - 1)  ; column 0's LDA
 
-; ptr0-ptr5 = the character cells holding byte columns draw_x DIV 2 .. +5 on the
+; ptr0.. = the character cells holding byte columns draw_x DIV 2 .. + SPR_BYTES - 1 on the
 ; character row containing draw_y; Y = draw_y AND 7, the row inside the cell.
 .screen_ptrs
     LDA draw_y : LSR A : LSR A : LSR A : TAY
@@ -1356,7 +1362,7 @@ NEXT
     LDA draw_y : AND #7 : TAY
     RTS
 
-; Step ptr0-ptr5 down one character row (640 bytes); Y = 0, the top row of the cell.
+; Step ptr0.. down one character row (640 bytes); Y = 0, the top row of the cell.
 .next_cell
     LDY #2 * SPR_BYTES - 2
 .nc_loop
@@ -1701,113 +1707,116 @@ ART_DRONE_B    = "0004004000" + "0004004000" + "0055555500" + "0557557550" + "06
 .gfx_bullet_step  : IMAGES ART_BULLET_STEP, 2, 8
 .gfx_abullet      : IMAGES ART_ABULLET, 1, 4
 .gfx_abullet_step : VDELTAS ART_ABULLET, 1, 4, ABULLET_SPEED
-.gfx_flagship     : IMAGES ART_FLAGSHIP, 10, 8
-.gfx_flagship_d   : DELTAS ART_FLAGSHIP, ART_FLAGSHIP, 10, 8
-.gfx_flagship_b   : IMAGES ART_FLAGSHIP_B, 10, 8
-.gfx_flagship_b_d : DELTAS ART_FLAGSHIP_B, ART_FLAGSHIP_B, 10, 8
-.gfx_escort       : IMAGES ART_ESCORT, 10, 8
-.gfx_escort_d     : DELTAS ART_ESCORT, ART_ESCORT, 10, 8
-.gfx_escort_b     : IMAGES ART_ESCORT_B, 10, 8
-.gfx_escort_b_d   : DELTAS ART_ESCORT_B, ART_ESCORT_B, 10, 8
-.gfx_drone        : IMAGES ART_DRONE, 10, 8
-.gfx_drone_d      : DELTAS ART_DRONE, ART_DRONE, 10, 8
-.gfx_drone_b      : IMAGES ART_DRONE_B, 10, 8
-.gfx_drone_b_d    : DELTAS ART_DRONE_B, ART_DRONE_B, 10, 8
-.gfx_flagship_ab  : DELTAS ART_FLAGSHIP, ART_FLAGSHIP_B, 10, 8
-.gfx_flagship_ba  : DELTAS ART_FLAGSHIP_B, ART_FLAGSHIP, 10, 8
-.gfx_escort_ab    : DELTAS ART_ESCORT, ART_ESCORT_B, 10, 8
-.gfx_escort_ba    : DELTAS ART_ESCORT_B, ART_ESCORT, 10, 8
-.gfx_drone_ab     : DELTAS ART_DRONE, ART_DRONE_B, 10, 8
-.gfx_drone_ba     : DELTAS ART_DRONE_B, ART_DRONE, 10, 8
-.gfx_flagship_v   : VDELTAS ART_FLAGSHIP, 10, 8, 1
-.gfx_flagship_b_v : VDELTAS ART_FLAGSHIP_B, 10, 8, 1
-.gfx_escort_v     : VDELTAS ART_ESCORT, 10, 8, 1
-.gfx_escort_b_v   : VDELTAS ART_ESCORT_B, 10, 8, 1
-.gfx_drone_v      : VDELTAS ART_DRONE, 10, 8, 1
-.gfx_drone_b_v    : VDELTAS ART_DRONE_B, 10, 8, 1
-.gfx_flagship_dn  : DDELTAS ART_FLAGSHIP, 10, 8, 0
-.gfx_flagship_b_dn: DDELTAS ART_FLAGSHIP_B, 10, 8, 0
-.gfx_escort_dn    : DDELTAS ART_ESCORT, 10, 8, 0
-.gfx_escort_b_dn  : DDELTAS ART_ESCORT_B, 10, 8, 0
-.gfx_drone_dn     : DDELTAS ART_DRONE, 10, 8, 0
-.gfx_drone_b_dn   : DDELTAS ART_DRONE_B, 10, 8, 0
-.gfx_flagship_up  : DDELTAS ART_FLAGSHIP, 10, 8, 1
-.gfx_flagship_b_up: DDELTAS ART_FLAGSHIP_B, 10, 8, 1
-.gfx_escort_up    : DDELTAS ART_ESCORT, 10, 8, 1
-.gfx_escort_b_up  : DDELTAS ART_ESCORT_B, 10, 8, 1
-.gfx_drone_up     : DDELTAS ART_DRONE, 10, 8, 1
-.gfx_drone_b_up   : DDELTAS ART_DRONE_B, 10, 8, 1
+.gfx_flagship     : IMAGES ART_FLAGSHIP, ALIEN_W, ALIEN_H
+.gfx_flagship_d   : DELTAS ART_FLAGSHIP, ART_FLAGSHIP, ALIEN_W, ALIEN_H
+.gfx_flagship_b   : IMAGES ART_FLAGSHIP_B, ALIEN_W, ALIEN_H
+.gfx_flagship_b_d : DELTAS ART_FLAGSHIP_B, ART_FLAGSHIP_B, ALIEN_W, ALIEN_H
+.gfx_escort       : IMAGES ART_ESCORT, ALIEN_W, ALIEN_H
+.gfx_escort_d     : DELTAS ART_ESCORT, ART_ESCORT, ALIEN_W, ALIEN_H
+.gfx_escort_b     : IMAGES ART_ESCORT_B, ALIEN_W, ALIEN_H
+.gfx_escort_b_d   : DELTAS ART_ESCORT_B, ART_ESCORT_B, ALIEN_W, ALIEN_H
+.gfx_drone        : IMAGES ART_DRONE, ALIEN_W, ALIEN_H
+.gfx_drone_d      : DELTAS ART_DRONE, ART_DRONE, ALIEN_W, ALIEN_H
+.gfx_drone_b      : IMAGES ART_DRONE_B, ALIEN_W, ALIEN_H
+.gfx_drone_b_d    : DELTAS ART_DRONE_B, ART_DRONE_B, ALIEN_W, ALIEN_H
+.gfx_flagship_ab  : DELTAS ART_FLAGSHIP, ART_FLAGSHIP_B, ALIEN_W, ALIEN_H
+.gfx_flagship_ba  : DELTAS ART_FLAGSHIP_B, ART_FLAGSHIP, ALIEN_W, ALIEN_H
+.gfx_escort_ab    : DELTAS ART_ESCORT, ART_ESCORT_B, ALIEN_W, ALIEN_H
+.gfx_escort_ba    : DELTAS ART_ESCORT_B, ART_ESCORT, ALIEN_W, ALIEN_H
+.gfx_drone_ab     : DELTAS ART_DRONE, ART_DRONE_B, ALIEN_W, ALIEN_H
+.gfx_drone_ba     : DELTAS ART_DRONE_B, ART_DRONE, ALIEN_W, ALIEN_H
+.gfx_flagship_v   : VDELTAS ART_FLAGSHIP, ALIEN_W, ALIEN_H, 1
+.gfx_flagship_b_v : VDELTAS ART_FLAGSHIP_B, ALIEN_W, ALIEN_H, 1
+.gfx_escort_v     : VDELTAS ART_ESCORT, ALIEN_W, ALIEN_H, 1
+.gfx_escort_b_v   : VDELTAS ART_ESCORT_B, ALIEN_W, ALIEN_H, 1
+.gfx_drone_v      : VDELTAS ART_DRONE, ALIEN_W, ALIEN_H, 1
+.gfx_drone_b_v    : VDELTAS ART_DRONE_B, ALIEN_W, ALIEN_H, 1
+.gfx_flagship_dn  : DDELTAS ART_FLAGSHIP, ALIEN_W, ALIEN_H, 0
+.gfx_flagship_b_dn: DDELTAS ART_FLAGSHIP_B, ALIEN_W, ALIEN_H, 0
+.gfx_escort_dn    : DDELTAS ART_ESCORT, ALIEN_W, ALIEN_H, 0
+.gfx_escort_b_dn  : DDELTAS ART_ESCORT_B, ALIEN_W, ALIEN_H, 0
+.gfx_drone_dn     : DDELTAS ART_DRONE, ALIEN_W, ALIEN_H, 0
+.gfx_drone_b_dn   : DDELTAS ART_DRONE_B, ALIEN_W, ALIEN_H, 0
+.gfx_flagship_up  : DDELTAS ART_FLAGSHIP, ALIEN_W, ALIEN_H, 1
+.gfx_flagship_b_up: DDELTAS ART_FLAGSHIP_B, ALIEN_W, ALIEN_H, 1
+.gfx_escort_up    : DDELTAS ART_ESCORT, ALIEN_W, ALIEN_H, 1
+.gfx_escort_b_up  : DDELTAS ART_ESCORT_B, ALIEN_W, ALIEN_H, 1
+.gfx_drone_up     : DDELTAS ART_DRONE, ALIEN_W, ALIEN_H, 1
+.gfx_drone_b_up   : DDELTAS ART_DRONE_B, ALIEN_W, ALIEN_H, 1
 
 ; ids: 0 player, 1 bullet, 2-3 flagship, 4-5 escort, 6-7 drone, 8 bullet step,
 ;      9 enemy bullet, 10 its step,
 ;      11-16 cross deltas (id - CROSS_OFS = the frame it starts from),
-;      17-22 vertical deltas (id - VERT_OFS = the frame), image-shaped and 9 rows,
-;      23-28 and 29-34 diagonal deltas (id - DOWN_OFS / UP_OFS = the frame), 9 rows
+;      17-22 vertical deltas (id - VERT_OFS = the frame), image-shaped and ALIEN_H + 1 rows,
+;      23-28 and 29-34 diagonal deltas (id - DOWN_OFS / UP_OFS = the frame), ALIEN_H + 1 rows
 .spr_h
-    EQUB 8, 4, 8, 8, 8, 8, 8, 8, 8, 4, 4 + ABULLET_SPEED, 8, 8, 8, 8, 8, 8
-    FOR i, 17, 34 : EQUB 9 : NEXT
+    EQUB 8, 4
+    FOR i, 2, 7 : EQUB ALIEN_H : NEXT
+    EQUB 8, 4, 4 + ABULLET_SPEED
+    FOR i, 11, 16 : EQUB ALIEN_H : NEXT
+    FOR i, 17, 34 : EQUB ALIEN_H + 1 : NEXT
 .img_lo
     IMG_LO gfx_player, 8, 8 : IMG_LO gfx_bullet, 2, 4
-    IMG_LO gfx_flagship, 10, 8 : IMG_LO gfx_flagship_b, 10, 8
-    IMG_LO gfx_escort, 10, 8 : IMG_LO gfx_escort_b, 10, 8
-    IMG_LO gfx_drone, 10, 8 : IMG_LO gfx_drone_b, 10, 8
+    IMG_LO gfx_flagship, ALIEN_W, ALIEN_H : IMG_LO gfx_flagship_b, ALIEN_W, ALIEN_H
+    IMG_LO gfx_escort, ALIEN_W, ALIEN_H : IMG_LO gfx_escort_b, ALIEN_W, ALIEN_H
+    IMG_LO gfx_drone, ALIEN_W, ALIEN_H : IMG_LO gfx_drone_b, ALIEN_W, ALIEN_H
     IMG_LO gfx_bullet_step, 2, 8
     IMG_LO gfx_abullet, 1, 4 : IMG_LO gfx_abullet_step, 1, 4 + ABULLET_SPEED
 .img_hi
     IMG_HI gfx_player, 8, 8 : IMG_HI gfx_bullet, 2, 4
-    IMG_HI gfx_flagship, 10, 8 : IMG_HI gfx_flagship_b, 10, 8
-    IMG_HI gfx_escort, 10, 8 : IMG_HI gfx_escort_b, 10, 8
-    IMG_HI gfx_drone, 10, 8 : IMG_HI gfx_drone_b, 10, 8
+    IMG_HI gfx_flagship, ALIEN_W, ALIEN_H : IMG_HI gfx_flagship_b, ALIEN_W, ALIEN_H
+    IMG_HI gfx_escort, ALIEN_W, ALIEN_H : IMG_HI gfx_escort_b, ALIEN_W, ALIEN_H
+    IMG_HI gfx_drone, ALIEN_W, ALIEN_H : IMG_HI gfx_drone_b, ALIEN_W, ALIEN_H
     IMG_HI gfx_bullet_step, 2, 8
     IMG_HI gfx_abullet, 1, 4 : IMG_HI gfx_abullet_step, 1, 4 + ABULLET_SPEED
 .img_entry
     IMG_ENTRY 8 : IMG_ENTRY 2
-    IMG_ENTRY 10 : IMG_ENTRY 10 : IMG_ENTRY 10 : IMG_ENTRY 10 : IMG_ENTRY 10 : IMG_ENTRY 10
+    IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W
     IMG_ENTRY 2
     IMG_ENTRY 1 : IMG_ENTRY 1
 .dlt_lo                             ; the bullets only move vertically: no deltas
     DLT_LO gfx_player_d, 8, 8 : EQUB 0, 0
-    DLT_LO gfx_flagship_d, 10, 8 : DLT_LO gfx_flagship_b_d, 10, 8
-    DLT_LO gfx_escort_d, 10, 8 : DLT_LO gfx_escort_b_d, 10, 8
-    DLT_LO gfx_drone_d, 10, 8 : DLT_LO gfx_drone_b_d, 10, 8
+    DLT_LO gfx_flagship_d, ALIEN_W, ALIEN_H : DLT_LO gfx_flagship_b_d, ALIEN_W, ALIEN_H
+    DLT_LO gfx_escort_d, ALIEN_W, ALIEN_H : DLT_LO gfx_escort_b_d, ALIEN_W, ALIEN_H
+    DLT_LO gfx_drone_d, ALIEN_W, ALIEN_H : DLT_LO gfx_drone_b_d, ALIEN_W, ALIEN_H
     EQUB 0, 0, 0, 0, 0, 0             ; ids 8-10 only move vertically
-    DLT_LO gfx_flagship_ab, 10, 8 : DLT_LO gfx_flagship_ba, 10, 8
-    DLT_LO gfx_escort_ab, 10, 8 : DLT_LO gfx_escort_ba, 10, 8
-    DLT_LO gfx_drone_ab, 10, 8 : DLT_LO gfx_drone_ba, 10, 8
-    IMG_LO gfx_flagship_v, 10, 9 : IMG_LO gfx_flagship_b_v, 10, 9
-    IMG_LO gfx_escort_v, 10, 9 : IMG_LO gfx_escort_b_v, 10, 9
-    IMG_LO gfx_drone_v, 10, 9 : IMG_LO gfx_drone_b_v, 10, 9
-    DLT_LO gfx_flagship_dn, 10, 9 : DLT_LO gfx_flagship_b_dn, 10, 9
-    DLT_LO gfx_escort_dn, 10, 9 : DLT_LO gfx_escort_b_dn, 10, 9
-    DLT_LO gfx_drone_dn, 10, 9 : DLT_LO gfx_drone_b_dn, 10, 9
-    DLT_LO gfx_flagship_up, 10, 9 : DLT_LO gfx_flagship_b_up, 10, 9
-    DLT_LO gfx_escort_up, 10, 9 : DLT_LO gfx_escort_b_up, 10, 9
-    DLT_LO gfx_drone_up, 10, 9 : DLT_LO gfx_drone_b_up, 10, 9
+    DLT_LO gfx_flagship_ab, ALIEN_W, ALIEN_H : DLT_LO gfx_flagship_ba, ALIEN_W, ALIEN_H
+    DLT_LO gfx_escort_ab, ALIEN_W, ALIEN_H : DLT_LO gfx_escort_ba, ALIEN_W, ALIEN_H
+    DLT_LO gfx_drone_ab, ALIEN_W, ALIEN_H : DLT_LO gfx_drone_ba, ALIEN_W, ALIEN_H
+    IMG_LO gfx_flagship_v, ALIEN_W, ALIEN_H + 1 : IMG_LO gfx_flagship_b_v, ALIEN_W, ALIEN_H + 1
+    IMG_LO gfx_escort_v, ALIEN_W, ALIEN_H + 1 : IMG_LO gfx_escort_b_v, ALIEN_W, ALIEN_H + 1
+    IMG_LO gfx_drone_v, ALIEN_W, ALIEN_H + 1 : IMG_LO gfx_drone_b_v, ALIEN_W, ALIEN_H + 1
+    DLT_LO gfx_flagship_dn, ALIEN_W, ALIEN_H + 1 : DLT_LO gfx_flagship_b_dn, ALIEN_W, ALIEN_H + 1
+    DLT_LO gfx_escort_dn, ALIEN_W, ALIEN_H + 1 : DLT_LO gfx_escort_b_dn, ALIEN_W, ALIEN_H + 1
+    DLT_LO gfx_drone_dn, ALIEN_W, ALIEN_H + 1 : DLT_LO gfx_drone_b_dn, ALIEN_W, ALIEN_H + 1
+    DLT_LO gfx_flagship_up, ALIEN_W, ALIEN_H + 1 : DLT_LO gfx_flagship_b_up, ALIEN_W, ALIEN_H + 1
+    DLT_LO gfx_escort_up, ALIEN_W, ALIEN_H + 1 : DLT_LO gfx_escort_b_up, ALIEN_W, ALIEN_H + 1
+    DLT_LO gfx_drone_up, ALIEN_W, ALIEN_H + 1 : DLT_LO gfx_drone_b_up, ALIEN_W, ALIEN_H + 1
 .dlt_hi
     DLT_HI gfx_player_d, 8, 8 : EQUB 0, 0
-    DLT_HI gfx_flagship_d, 10, 8 : DLT_HI gfx_flagship_b_d, 10, 8
-    DLT_HI gfx_escort_d, 10, 8 : DLT_HI gfx_escort_b_d, 10, 8
-    DLT_HI gfx_drone_d, 10, 8 : DLT_HI gfx_drone_b_d, 10, 8
+    DLT_HI gfx_flagship_d, ALIEN_W, ALIEN_H : DLT_HI gfx_flagship_b_d, ALIEN_W, ALIEN_H
+    DLT_HI gfx_escort_d, ALIEN_W, ALIEN_H : DLT_HI gfx_escort_b_d, ALIEN_W, ALIEN_H
+    DLT_HI gfx_drone_d, ALIEN_W, ALIEN_H : DLT_HI gfx_drone_b_d, ALIEN_W, ALIEN_H
     EQUB 0, 0, 0, 0, 0, 0             ; ids 8-10 only move vertically
-    DLT_HI gfx_flagship_ab, 10, 8 : DLT_HI gfx_flagship_ba, 10, 8
-    DLT_HI gfx_escort_ab, 10, 8 : DLT_HI gfx_escort_ba, 10, 8
-    DLT_HI gfx_drone_ab, 10, 8 : DLT_HI gfx_drone_ba, 10, 8
-    IMG_HI gfx_flagship_v, 10, 9 : IMG_HI gfx_flagship_b_v, 10, 9
-    IMG_HI gfx_escort_v, 10, 9 : IMG_HI gfx_escort_b_v, 10, 9
-    IMG_HI gfx_drone_v, 10, 9 : IMG_HI gfx_drone_b_v, 10, 9
-    DLT_HI gfx_flagship_dn, 10, 9 : DLT_HI gfx_flagship_b_dn, 10, 9
-    DLT_HI gfx_escort_dn, 10, 9 : DLT_HI gfx_escort_b_dn, 10, 9
-    DLT_HI gfx_drone_dn, 10, 9 : DLT_HI gfx_drone_b_dn, 10, 9
-    DLT_HI gfx_flagship_up, 10, 9 : DLT_HI gfx_flagship_b_up, 10, 9
-    DLT_HI gfx_escort_up, 10, 9 : DLT_HI gfx_escort_b_up, 10, 9
-    DLT_HI gfx_drone_up, 10, 9 : DLT_HI gfx_drone_b_up, 10, 9
+    DLT_HI gfx_flagship_ab, ALIEN_W, ALIEN_H : DLT_HI gfx_flagship_ba, ALIEN_W, ALIEN_H
+    DLT_HI gfx_escort_ab, ALIEN_W, ALIEN_H : DLT_HI gfx_escort_ba, ALIEN_W, ALIEN_H
+    DLT_HI gfx_drone_ab, ALIEN_W, ALIEN_H : DLT_HI gfx_drone_ba, ALIEN_W, ALIEN_H
+    IMG_HI gfx_flagship_v, ALIEN_W, ALIEN_H + 1 : IMG_HI gfx_flagship_b_v, ALIEN_W, ALIEN_H + 1
+    IMG_HI gfx_escort_v, ALIEN_W, ALIEN_H + 1 : IMG_HI gfx_escort_b_v, ALIEN_W, ALIEN_H + 1
+    IMG_HI gfx_drone_v, ALIEN_W, ALIEN_H + 1 : IMG_HI gfx_drone_b_v, ALIEN_W, ALIEN_H + 1
+    DLT_HI gfx_flagship_dn, ALIEN_W, ALIEN_H + 1 : DLT_HI gfx_flagship_b_dn, ALIEN_W, ALIEN_H + 1
+    DLT_HI gfx_escort_dn, ALIEN_W, ALIEN_H + 1 : DLT_HI gfx_escort_b_dn, ALIEN_W, ALIEN_H + 1
+    DLT_HI gfx_drone_dn, ALIEN_W, ALIEN_H + 1 : DLT_HI gfx_drone_b_dn, ALIEN_W, ALIEN_H + 1
+    DLT_HI gfx_flagship_up, ALIEN_W, ALIEN_H + 1 : DLT_HI gfx_flagship_b_up, ALIEN_W, ALIEN_H + 1
+    DLT_HI gfx_escort_up, ALIEN_W, ALIEN_H + 1 : DLT_HI gfx_escort_b_up, ALIEN_W, ALIEN_H + 1
+    DLT_HI gfx_drone_up, ALIEN_W, ALIEN_H + 1 : DLT_HI gfx_drone_b_up, ALIEN_W, ALIEN_H + 1
 .dlt_entry
     DLT_ENTRY 8 : EQUB 0, 0
-    DLT_ENTRY 10 : DLT_ENTRY 10 : DLT_ENTRY 10 : DLT_ENTRY 10 : DLT_ENTRY 10 : DLT_ENTRY 10
+    DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W
     EQUB 0, 0, 0, 0, 0, 0
-    DLT_ENTRY 10 : DLT_ENTRY 10 : DLT_ENTRY 10 : DLT_ENTRY 10 : DLT_ENTRY 10 : DLT_ENTRY 10
-    IMG_ENTRY 10 : IMG_ENTRY 10 : IMG_ENTRY 10 : IMG_ENTRY 10 : IMG_ENTRY 10 : IMG_ENTRY 10
-    FOR i, 21, 32 : DLT_ENTRY 10 : NEXT
+    DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W
+    IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W
+    FOR i, 21, 32 : DLT_ENTRY ALIEN_W : NEXT
 
 .end
 

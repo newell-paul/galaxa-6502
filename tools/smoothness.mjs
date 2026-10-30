@@ -36,8 +36,17 @@ for (const m of fs.readFileSync(path.join(ROOT, "swarm.sym"), "utf8").matchAll(/
 const art = {};
 for (const m of src.matchAll(/^ART_(\w+)\s*=\s*(.+)$/gm))
   art[m[1].toLowerCase()] = [...m[2].matchAll(/"([0-9]+)"/g)].map((x) => [...x[1]].map(Number));
-const num = (name) => Number(src.match(new RegExp(`^${name}\\s*=\\s*(\\d+)`, "m"))[1]);
+// A constant: a number, or a sum or product of other constants (DIV rounds down)
+const num = (name) => {
+  const expr = src.match(new RegExp(`^${name}\\s*=\\s*([^;\\n]+)`, "m"))[1];
+  const js = expr.replace(/(\w+) DIV (\d+)/g, "Math.floor($1 / $2)").replace(/\b[A-Z][A-Z0-9_]*\b/g, num);
+  if (!/^(?:[\d\s+\-*/()]|Math\.floor)*$/.test(js)) throw new Error(`${name}: not plain arithmetic: ${expr}`);
+  return Function(`return ${js}`)();
+};
 const PLAYER_Y = num("PLAYER_Y");
+const ALIEN_W = num("ALIEN_W");
+const ALIEN_H = num("ALIEN_H");
+const ALIEN_MID = num("ALIEN_MID");
 const FORM_ROWS = num("FORM_ROWS");
 const FORM_COLS = num("FORM_COLS");
 const LEVELS = num("LEVELS");
@@ -221,18 +230,18 @@ function findSprites(g) {
 function overlapZones(ram) {
   const boxes = [{ x: ram.player_x, y: PLAYER_Y, h: 8 }];
   for (const b of [...ram.bullets, ...ram.abullets]) if (b.on) boxes.push({ x: b.x, y: b.y, h: 4 });
-  if (ram.diver_state) boxes.push({ x: ram.diver_x, y: ram.diver_y, h: 8 });
+  if (ram.diver_state) boxes.push({ x: ram.diver_x, y: ram.diver_y, h: ALIEN_H });
   ram.alive.forEach((a, i) => {
     const r = Math.floor(i / FORM_COLS);
-    if (a === 1) boxes.push({ x: slotX(ram, i), y: slotY(ram, i), h: 8 });
+    if (a === 1) boxes.push({ x: slotX(ram, i), y: slotY(ram, i), h: ALIEN_H });
   });
   const zones = [];
   for (let a = 0; a < boxes.length; a++)
     for (let b = a + 1; b < boxes.length; b++) {
       const A = boxes[a], B = boxes[b];
-      if (Math.abs(A.x - B.x) < 12 && A.y < B.y + B.h + 2 && B.y < A.y + A.h + 2)
+      if (Math.abs(A.x - B.x) < ALIEN_W + 2 && A.y < B.y + B.h + 2 && B.y < A.y + A.h + 2)
         zones.push({
-          x0: Math.min(A.x, B.x) - 2, x1: Math.max(A.x, B.x) + 12,
+          x0: Math.min(A.x, B.x) - 2, x1: Math.max(A.x, B.x) + ALIEN_W + 2,
           y0: Math.min(A.y, B.y) - 2, y1: Math.max(A.y + A.h, B.y + B.h) + 2,
         });
     }
@@ -341,12 +350,12 @@ for (let i = 0; i < captured.length; i++) {
       spawns.push(i);
       spawnLevels.push(ram.level);
       // aimed from the diver as it was when the frame began
-      const from = prev?.diver_state === 1 && Math.abs(b.x - (prev.diver_x + 4)) <= 2 ? prev : null;
+      const from = prev?.diver_state === 1 && Math.abs(b.x - (prev.diver_x + ALIEN_MID)) <= 2 ? prev : null;
       if (from) shooterRows.add(Math.floor(from.diver_slot / FORM_COLS));
       else strayShots++;
       // a burst opens only once the diver is low and over the player (after the player's move)
       const opens = spawns.length < 2 || i - spawns[spawns.length - 2] !== BURST_GAP;
-      const dx = from && from.diver_x + 4 - (ram.player_x + 6);
+      const dx = from && from.diver_x + ALIEN_MID - (ram.player_x + 6);
       if (from && opens && (from.diver_y < afireTops[from.level] || Math.abs(dx) > afireRanges[from.level]))
         farBursts.push({ frame: i, diver_y: from.diver_y, dx });
     }
