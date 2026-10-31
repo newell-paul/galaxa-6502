@@ -57,6 +57,7 @@ const SPARE_Y = num("SPARE_Y");
 const PLAYER_START = num("PLAYER_START");
 const ALIEN_W = num("ALIEN_W");
 const ALIEN_H = num("ALIEN_H");
+const DIVER_TOP = num("DIVER_TOP");
 const ALIEN_MID = num("ALIEN_MID");
 const FORM_ROWS = num("FORM_ROWS");
 const FORM_COLS = num("FORM_COLS");
@@ -71,12 +72,14 @@ const BULLETS = num("BULLETS");
 const NUM_STARS = num("NUM_STARS");
 const ABULLETS = num("ABULLETS");
 const ABULLET_SPEED = num("ABULLET_SPEED");
+const BULLET_SPEED = num("BULLET_SPEED");
 const BURST_GAP = num("BURST_GAP");
 const DIVER_SPEED = num("DIVER_SPEED");
 const BREATH_MAX = num("BREATH_MAX");
 const BANNER_Y = num("BANNER_Y");
 const BANNER_COL = num("BANNER_COL");
 const BANNER_TIME = num("BANNER_TIME");
+const GLYPH_COLOUR = num("GLYPH_COLOUR");
 const DROP_Y = num("DROP_Y");
 const VBREATH_MAX = num("VBREATH_MAX");
 const WINGS = num("WINGS");
@@ -87,10 +90,10 @@ const INTRO_WARP = num("INTRO_WARP");
 const WARP_VMAX = num("WARP_VMAX");
 const STAR_TOP = num("STAR_TOP");
 // Logical colour -> the physical colours it can show; the pulsing one cycles.
-const PULSE_COLOUR = num("PULSE_COLOUR");
-const pulse = src.match(/^\.pulse_colours[^\n]*\n\s*EQUB ([\d, ]+)/m)[1].split(",").map(Number);
+const PULSE_COLOUR = num("FLAG_COLOUR");
+const pulse = [num("FLAG_PHYS"), num("FLAG_PHYS") ^ num("FLAG_FLASH")];
 const BOSS_COLOUR = num("BOSS_COLOUR");
-const bossColours = src.match(/^\.boss_colours[^\n]*\n\s*EQUB ([\d, ]+)/m)[1].split(",").map(Number);
+const bossColours = [num("BOSS_PHYS")];
 const shows = (logical, phys) =>
   logical === PULSE_COLOUR ? pulse.includes(phys) : logical === BOSS_COLOUR ? bossColours.includes(phys) : logical === phys;
 
@@ -122,7 +125,7 @@ m.processor.reset(false);
 await m.runFor(2e6 * 0.5);
 m.processor.sysvia.keyUp(utils.keyCodes.SHIFT);
 const idle = await untilInput(10);
-const prompt = [...Array(13)].map((_, i) => String.fromCharCode(m.readbyte(0x7c00 + 23 * 40 + 14 + i))).join("");
+const prompt = [...Array(13)].map((_, i) => String.fromCharCode(m.readbyte(0x7c00 + 22 * 40 + 14 + i))).join("");
 const bootedToTitle = idle && prompt === "PRESS ANY KEY";
 if (idle) await m.type(" ");
 console.log = print;
@@ -177,6 +180,7 @@ function snapshot() {
     ships_shown: rb(labels.ships_shown), player_state: rb(labels.player_state), player_row: rb(labels.player_row),
     score: bcd(rb(labels.score_hi)) * 1000 + bcd(rb(labels.score_lo)) * 10, wave: bcd(rb(labels.wave)),
     power: rb(zp.power), bonus_on: rb(zp.bonus_on), bonus_x: rb(zp.bonus_x), bonus_y: rb(zp.bonus_y),
+    expl_t: rb(zp.expl_t), expl_x: rb(zp.expl_x), expl_y: rb(labels.expl_y),
   };
 }
 // The diver's wings in flight, at their screen positions.
@@ -184,13 +188,22 @@ const wingsOf = (q) => (q?.diver_state ? q.wings.map((w, k) => ({ ...w, k, x: q.
 
 // ------------------------------------------------------------------ scripted input
 const KEYS = { Z: utils.keyCodes.Z, X: utils.keyCodes.X, FIRE: utils.keyCodes.ENTER };
-// Aims: under a falling capsule, else a low diver, else the nearest alien of the lowest
-// row still holding one, else the boss at home; fires whenever it can.
+// Aims: under a falling capsule (stepping aside from a guard coming down at it), else a
+// low diver, else the nearest alien of the lowest row still holding one, else the boss
+// at home; fires whenever it can.
 function keysFor(i) {
   const held = new Set();
   const rb = (a) => m.readbyte(a);
+  const sb = (a) => (rb(a) << 24) >> 24;
   let target = null;
-  if (rb(zp.bonus_on)) target = rb(zp.bonus_x);
+  if (rb(zp.bonus_on)) {
+    target = rb(zp.bonus_x);
+    for (let k = 0; k < WINGS && rb(zp.diver_state); k++) {
+      const wx = rb(zp.diver_x) + sb(zp.wing_ox + k), wy = rb(zp.diver_y) + sb(zp.wing_oy + k);
+      if (rb(zp.wing_on + k) && wy > PLAYER_Y - 80 && wy < PLAYER_Y + 8 && Math.abs(wx - target) < 14)
+        target = Math.min(Math.max(wx + (target >= wx ? 14 : -14), 0), num("PLAYER_MAX_X"));
+    }
+  }
   else if (rb(zp.diver_state) === 1 && rb(zp.diver_y) > 96) target = rb(zp.diver_x) + ALIEN_MID - 3;
   else
     for (let r = FORM_ROWS - 1; r >= 0 && target == null; r--)
@@ -258,7 +271,7 @@ capturing = true;
 while (captured.length < FRAMES) await m.runFor(20000);
 
 // ------------------------------------------------------------------ analysis
-const templates = ["player", "bullet", "abullet", "bonus", "flagship", "flagship_b", "escort", "escort_b", "drone", "drone_b", "boss"].map((name) => ({
+const templates = ["player", "bullet", "abullet", "bonus", "expl", "flagship", "flagship_b", "escort", "escort_b", "drone", "drone_b", "boss"].map((name) => ({
   name,
   rows: art[name],
   w: art[name][0].length,
@@ -294,22 +307,35 @@ function findSprites(g) {
 }
 
 // Boxes where two objects overlap: EOR mixes them, so the pixels there match nothing.
-function overlapZones(ram) {
-  const boxes = [{ x: ram.player_x, y: ram.player_row, h: 8 }];
-  for (let k = 0; k < ram.ships_shown; k++) boxes.push({ x: 10 * k, y: SPARE_Y, h: 8 });
-  for (const b of [...ram.bullets, ...ram.abullets]) if (b.on) boxes.push({ x: b.x, y: b.y, h: 4 });
-  if (ram.diver_state) boxes.push({ x: ram.diver_x, y: ram.diver_y, h: ALIEN_H });
-  for (const w of wingsOf(ram)) boxes.push({ x: w.x, y: w.y, h: ALIEN_H });
-  if (ram.bonus_on) boxes.push({ x: ram.bonus_x, y: ram.bonus_y, h: ALIEN_H });
-  ram.alive.forEach((a, i) => {
-    const r = Math.floor(i / FORM_COLS);
-    if (a === 1) boxes.push({ x: slotX(ram, i), y: slotY(ram, i), h: ALIEN_H });
-  });
+// Objects drawn behind the beam appear a frame later, so either frame's position counts,
+// though never an object against its own other position.
+function overlapZones(...rams) {
+  const boxes = [];
+  for (const ram of rams) {
+    boxes.push({ id: "player", x: ram.player_x, y: ram.player_row, h: 8 });
+    for (let k = 0; k < ram.ships_shown; k++) boxes.push({ id: `spare${k}`, x: 10 * k, y: SPARE_Y, h: 8 });
+    ram.bullets.forEach((b, k) => b.on && boxes.push({ id: `b${k}`, x: b.x, y: b.y, h: 4 }));
+    ram.abullets.forEach((b, k) => b.on && boxes.push({ id: `ab${k}`, x: b.x, y: b.y, h: 4 }));
+    if (ram.diver_state) boxes.push({ id: "diver", x: ram.diver_x, y: ram.diver_y, h: ALIEN_H });
+    wingsOf(ram).forEach((w) => boxes.push({ id: `w${w.k}`, x: w.x, y: w.y, h: ALIEN_H }));
+    if (ram.bonus_on) boxes.push({ id: "bonus", x: ram.bonus_x, y: ram.bonus_y, h: ALIEN_H });
+    if (ram.expl_t) boxes.push({ id: "expl", x: ram.expl_x & 0xfe, y: ram.expl_y, h: ALIEN_H }); // odd x: drawn a pixel left
+    ram.alive.forEach((a, i) => {
+      if (a === 1) boxes.push({ id: `s${i}`, x: slotX(ram, i), y: slotY(ram, i), h: ALIEN_H });
+    });
+  }
+  // a diver wrapping round is drawn at DIVER_TOP, a position neither frame holds
+  const [ram, prev] = rams;
+  if (prev && ram.diver_state && prev.diver_y > ram.diver_y + 100) {
+    const dy = DIVER_TOP - ram.diver_y;
+    boxes.push({ id: "diver", x: ram.diver_x, y: DIVER_TOP, h: ALIEN_H });
+    wingsOf(ram).forEach((w) => boxes.push({ id: `w${w.k}`, x: w.x, y: w.y + dy, h: ALIEN_H }));
+  }
   const zones = [];
   for (let a = 0; a < boxes.length; a++)
     for (let b = a + 1; b < boxes.length; b++) {
       const A = boxes[a], B = boxes[b];
-      if (Math.abs(A.x - B.x) < ALIEN_W + 2 && A.y < B.y + B.h + 2 && B.y < A.y + A.h + 2)
+      if (A.id !== B.id && Math.abs(A.x - B.x) < ALIEN_W + 2 && A.y < B.y + B.h + 2 && B.y < A.y + A.h + 2)
         zones.push({
           x0: Math.min(A.x, B.x) - 2, x1: Math.max(A.x, B.x) + ALIEN_W + 2,
           y0: Math.min(A.y, B.y) - 2, y1: Math.max(A.y + A.h, B.y + B.h) + 2,
@@ -400,8 +426,7 @@ for (let i = 0; i < captured.length; i++) {
   const covered = new Uint8Array(160 * 256);
   for (const s of sprites)
     for (let r = 0; r < s.h; r++) for (let c = 0; c < s.w; c++) covered[(s.y + r) * 160 + s.x + c] = 1;
-  // objects drawn behind the beam appear a frame later, so allow last frame's overlaps too
-  const zones = [...overlapZones(ram), ...(prev ? overlapZones(prev) : [])];
+  const zones = prev ? overlapZones(ram, prev) : overlapZones(ram);
   let garbage = 0, where = null;
   for (let y = 8; y < 256; y++)
     for (let x = 0; x < 160; x++) {
@@ -416,7 +441,7 @@ for (let i = 0; i < captured.length; i++) {
   if (ram.intro === 1) {
     let lit = 0;
     for (let y = BANNER_Y; y < BANNER_Y + 8; y++)
-      for (let x = BANNER_COL * 8; x < BANNER_COL * 8 + 48; x++) if (grid[y * 160 + x] === 7 && !starAt[y * 160 + x]) lit++;
+      for (let x = BANNER_COL * 8; x < BANNER_COL * 8 + 48; x++) if (grid[y * 160 + x] === GLYPH_COLOUR && !starAt[y * 160 + x]) lit++;
     if (lit > 40) bannerFrames++;
   }
 
@@ -498,8 +523,12 @@ for (let i = 0; i < captured.length; i++) {
   if (bossDiving && !prev?.diver_state) bossEv.dives++;
   tracks.boss.push(bossDiving && diver?.name === "boss" ? { x: diver.x, y: diver.y } : null);
   tracks.bossDown.push(bossDiving && ram.diver_state === 1 ? tracks.boss.at(-1) : null);
-  // it and its guards on the way down; going home they slow to their slots' pace
-  tracks.guards.forEach((t, k) => t.push(bossDiving && ram.diver_state === 1 ? tracks.wings[k].at(-1) : null));
+  // it and its guards on the way down; going home they slow to their slots' pace. A guard
+  // closing in on the boss as fast as the boss drifts its way holds still, yet still moves
+  tracks.guards.forEach((t, k) => {
+    const at = bossDiving && ram.diver_state === 1 ? tracks.wings[k].at(-1) : null;
+    t.push(at && { ...at, off: `${ram.wings[k].ox},${ram.wings[k].oy}` });
+  });
   if (bossDiving && diver?.name === "boss" && wingSeen.length === WINGS && wingSeen.every(Boolean)) bossEv.guardedFrames++;
   // its flashing parts, logical BOSS_COLOUR: the physical colours they show
   for (const s of sprites.filter((s) => s.name === "boss"))
@@ -591,14 +620,19 @@ function cadence(series) {
   return gaps;
 }
 
-// Moves after a gap over 2 frames, unless a 1px glide every 3 frames.
+// Moves after a gap over 2 frames, unless a 1px glide every 3 frames. A change of offset
+// from the leader counts as a move: the guard held still on screen while closing in.
 function slowGaps(track) {
   const bad = [];
   let last = null;
   for (let i = 1; i < track.length; i++) {
     const p = track[i], q = track[i - 1];
     if (p == null) last = null;
-    if (p == null || q == null || (p.x === q.x && p.y === q.y)) continue;
+    if (p == null || q == null) continue;
+    if (p.x === q.x && p.y === q.y) {
+      if (p.off !== q.off) last = i;
+      continue;
+    }
     const g = last == null ? 0 : i - last;
     if (g > 3 || (g === 3 && Math.max(Math.abs(p.x - q.x), Math.abs(p.y - q.y)) > 1)) bad.push(i);
     last = i;
@@ -708,7 +742,7 @@ const checks = {
     only(report.wing_x_steps, (d) => Math.abs(d) <= 2) && only(report.wing_y_steps, (d) => Math.abs(d) <= DIVER_SPEED || d < -100),
   "diver loops: it climbs before diving": Object.keys(report.diver_y_steps).some((k) => k < 0 && k > -100),
   "aliens flap: both frames shown": report.alien_frames_seen.filter((n) => n !== "boss").length === 6,
-  "bullets move 4px per frame": report.bullet_steps.every((h) => only(h, (d) => d === -4)),
+  [`bullets move ${BULLET_SPEED}px per frame`]: report.bullet_steps.every((h) => only(h, (d) => d === -BULLET_SPEED)),
   [`${BULLETS} bullets in flight at once`]: report.max_bullets_in_flight === BULLETS,
   "at most 3 enemy bullets at once": ABULLETS === 3 && report.max_abullets_in_flight === 3,
   [`enemy bullets move ${ABULLET_SPEED}px per frame`]: Object.keys(report.abullet_steps).length > 0 && only(report.abullet_steps, (d) => d === ABULLET_SPEED),
@@ -739,7 +773,7 @@ const checks = {
   "the capsule falls 1px per frame": report.bonus.steps[1] > 0 && only(report.bonus.steps, (d) => d === 1),
   "single shot until the capsule is caught, double until a ship is lost or the stage ends": bonusEv.catches > 0 &&
     bonusEv.doubleShots > 0 && bonusEv.secondWithoutPower === 0 && bonusEv.lostWithoutHit === 0 && bonusEv.keptIntoStage === 0,
-  "the boss flashes its own colours, never the flagships'": report.boss.colours.length > 1 &&
+  "the boss shows its own colours, never the flagships'": report.boss.colours.length === new Set(bossColours).size &&
     report.boss.colours.every((c) => bossColours.includes(c)) && !report.boss.colours.some((c) => report.boss.pulseSeen.includes(c)),
   "the boss dives with two guards, as smoothly": report.boss.dives > 0 && report.boss.guardedFrames > 0 && report.wing_frames[1] > 0 &&
     only(report.boss.x_steps, (d) => Math.abs(d) <= 2) && only(report.boss.y_steps, (d) => Math.abs(d) <= DIVER_SPEED || d < -100) &&

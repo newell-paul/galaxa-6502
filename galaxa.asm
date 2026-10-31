@@ -56,8 +56,11 @@ ALIEN_H      = 8
 ALIEN_MID    = ALIEN_W DIV 2 - 1
 SPR_BYTES    = (ALIEN_W + 1) DIV 2 + 1
 
-PULSE_COLOUR = 2
+FLAG_COLOUR  = 2              ; logical: the capsule, flashing
+FLAG_PHYS    = 3              ; yellow,
+FLAG_FLASH   = 2              ; then red: frame bit 3, shifted twice
 BOSS_COLOUR  = 3
+BOSS_PHYS    = 3              ; yellow
 STAR_COLOUR  = 8              ; 9-15 repeat 1-7: a star never shows over a sprite
 
 NUM_STARS    = 30
@@ -99,10 +102,8 @@ GAME_OVER_TIME = 100
 
 HS_ENTRIES   = 5
 HS_DIGITS    = 16
-PROMPT_LEN   = 13
 TT_FLASH     = 136
-TT_BLUE      = 132
-TT_GREEN     = 130
+TT_GREEN     = 146              ; graphics: the stage squares are sixels
 ASSERT PLAYER_MAX_X + ALIEN_W <= 160
 
 FORM_COLS    = 6
@@ -111,8 +112,8 @@ FORM_COUNT   = FORM_COLS * FORM_ROWS
 FORM_INSET   = "2100"         ; empty columns at each end, per row
 WAVE_COUNT   = FORM_COUNT - 2 * (VAL(MID$(FORM_INSET, 1, 1)) + VAL(MID$(FORM_INSET, 2, 1)) + VAL(MID$(FORM_INSET, 3, 1)) + VAL(MID$(FORM_INSET, 4, 1)))
 FORM_Y       = 32
-COL_STEP     = ALIEN_W + 4
-ROW_STEP     = ALIEN_H + 4
+COL_STEP     = ALIEN_W + 5
+ROW_STEP     = ALIEN_H + 5
 BREATH_MAX   = 8
 VBREATH_MAX  = 3
 FX_START     = 40
@@ -140,7 +141,7 @@ WARP_VMAX    = 8
 INTRO_WARP   = 3
 
 BULLETS      = 2
-BULLET_SPEED = 4              ; = bullet height: old and new positions just touch
+BULLET_SPEED = 6              ; over the 4px height: the step image has a gap between old and new
 FIRE_DELAY   = 16
 BULLET_TOP   = 8
 
@@ -149,6 +150,9 @@ BONUS_BOTTOM = 256 - ALIEN_H
 BONUS_LIFT   = 24
 SPR_BONUS    = 11             ; delta id 11 is a cross delta of the same height
 SPR_BOSS     = 12
+SPR_EXPL    = 13             ; delta id 13 is a cross delta of the same height
+EXPL_W      = 7
+EXPL_TIME   = 6              ; frames an explosion shows
 
 ABULLETS     = 3
 ABULLET_SPEED = 4
@@ -158,11 +162,14 @@ AFIRE_LOW    = PLAYER_Y - 24
 GLYPHS       = 15
 GLYPH_PLUS   = 14
 GLYPH_W      = 10
+GLYPH_COLOUR = 7               ; white: the score and WAVE banner
 BANNER_Y     = 120
 BANNER_COL   = 7
 BANNER_TIME  = 100
 BONUS_DELAY  = 35                 ; the banner and its tune before the bonus ticks in: the tick flushes channel 3
-BONUS_TICK   = 13                 ; then 100 every 260ms
+BONUS_TICK   = 5                  ; then 100 every 100ms, each tick a semitone higher
+TICK_PITCH   = 101
+TICK_TOP     = 249                ; the tick's pitch stops rising here
 DROP_Y       = 8
 ORDER_N      = 4 + ABULLETS   ; formation, 2 bullets, diver, enemy bullets
 DEFER_Y      = 112            ; this low: drawn at the next frame's start, ahead of the beam
@@ -237,6 +244,8 @@ bonus_y      = &86
 stage_bonus  = &87            ; BCD: 500s still to add, one a frame
 tune_x       = &88
 tune_n       = &89
+expl_t      = &6A            ; frames the explosion has left, 0: none
+expl_x      = &6B
 ; &90-&CF: filing system workspace, unused once loaded (checked in jsbeeb)
 WINGS        = 2
 wing_on      = &90
@@ -342,6 +351,8 @@ GUARD &40
     SKIP 1
 .bonus_wait                         ; frames to the next 100
     SKIP 1
+.expl_y
+    SKIP 1
 ORG &8A
 GUARD &90
 .bullets_on
@@ -406,17 +417,11 @@ GUARD &0DF0
     LDA #122 : JSR OSBYTE           ; wait for every key up: one held from the game
     INX : BNE title                 ; mustn't skip the title
     LDA #&81 : STA SYS_IER          ; OS keyboard IRQ on for the title
-    LDA #21 : LDX #0 : JSR OSBYTE
+    LDA #21 : JSR OSBYTE            ; X = 0 from the loop: flush the keyboard buffer
     LDX #LO(txt_mode7) : LDY #HI(txt_mode7) : JSR print_vdu
     JSR draw_title
-    LDX hs_new : BMI ti_wait
-    JSR hs_row
-    LDY #0 : LDA #TT_FLASH : STA (ptr1),Y   ; the new score flashes
-.ti_wait
-    LDX #PROMPT_LEN - 1
-.ti_prompt
-    LDA txt_prompts,X : STA MODE7_SCREEN + PROMPT_ROW * 40 + PROMPT_COL,X
-    DEX : BPL ti_prompt
+    LDX hs_new : JSR hs_row
+    LDY #0 : LDA #TT_FLASH : STA (ptr1),Y   ; the new score flashes, or the blank row below
     JSR OSRDCH
     LDA #&01 : STA SYS_IER          ; keyboard IRQ off: the OS handler would steal time mid-frame
     SEI                             ; nor the 100Hz held-key poll: ~1ms a tick
@@ -465,9 +470,7 @@ GUARD &0DF0
     JSR twinkle_stars
     JSR update_stars
 .ml_stars_done
-    JSR flush_plots                 ; long before the beam gets there
-    INC frame
-    JSR pulse_flagships
+    JSR frame_start                 ; long before the beam gets there
     LDA fire_cool : BEQ ml_cool_done
     DEC fire_cool
 .ml_cool_done
@@ -479,6 +482,7 @@ GUARD &0DF0
 .ml_hud_done
     JSR alien_fire
     JSR update_in_beam_order
+    JSR update_expl
     JSR check_player_hit
     JSR play_sfx                    ; the beam is done with the sprites: time to spare
     LDA player_state : CMP #PS_OVER : BEQ game_over
@@ -528,6 +532,7 @@ GUARD &0DF0
 .nw_next_bullet
     DEX : BPL nw_bullets
     JSR bonus_clear
+    JSR expl_clear
     LDX #ABULLETS - 1
 .nw_abullets
     LDA abullets_on,X : BEQ nw_next_abullet
@@ -538,13 +543,14 @@ GUARD &0DF0
     LDX abullet_idx : LDA #0 : STA abullets_on,X
 .nw_next_abullet
     DEX : BPL nw_abullets
-    LDA #0 : STA burst_left : STA afire_armed
+    STA burst_left : STA afire_armed   ; A = 0 either way out of the loop
     JSR intro_frame
     LDA wave : CMP #2 : BCS nw_bonus    ; N x 500, ticked in 100s under the banner
-    LDA #0                              ; none for stage 1: the game starts on 0
+    LSR A                               ; none for stage 1: the game starts on 0
 .nw_bonus
     STA stage_bonus
     LDA #5 : STA bonus_sub
+    LDA #TICK_PITCH - 4 : STA sfx_data + SND_TICK + 2
     LDA #BONUS_DELAY : STA bonus_wait
     JSR toggle_banner
     LDX #SND_WAVE : JSR play_tune
@@ -556,13 +562,11 @@ GUARD &0DF0
 .nw_counted
     ORA stage_bonus : BNE nw_banner
     JSR toggle_banner
-    LDA wave : CMP #2 : BCC nw_dropping     ; then the warp to the next stage
-    LDA #INTRO_WARP : STA intro
+    LDA #INTRO_WARP : STA intro     ; then the warp to the stage
     LDA #WARP_TIME : STA intro_t
 .nw_warp
     JSR intro_frame
     DEC intro_t : BNE nw_warp
-.nw_dropping
     LDA #2 : STA intro
 .nw_drop
     JSR intro_frame
@@ -576,7 +580,7 @@ GUARD &0DF0
     LDA #0
     LDX intro : CPX #INTRO_WARP : BNE if_moves
     LDX intro_t : DEX : STX tmp
-    LDA #WARP_TIME : SEC : SBC intro_t
+    LDA #WARP_TIME : SBC intro_t    ; C set by the CPX
     CMP tmp : BCC if_ease
     LDA tmp
 .if_ease
@@ -596,9 +600,7 @@ GUARD &0DF0
     JSR update_stars_top
     JSR update_stars_rest
 .if_stars
-    JSR flush_plots
-    INC frame
-    JSR pulse_flagships
+    JSR frame_start
     JSR read_keys
     JSR update_player
     LDA stage_bonus : BEQ if_tune
@@ -606,12 +608,24 @@ GUARD &0DF0
     LDA #BONUS_TICK : STA bonus_wait
     LDA #&10 : JSR add_score
     JSR print_hud                   ; the beam is past the HUD, as in the main loop
-    LDX #SND_POWER : JSR sound      ; the power-up jingle's first note
+    LDA sfx_data + SND_TICK + 2 : CMP #TICK_TOP : BCS if_top
+    ADC #4 : STA sfx_data + SND_TICK + 2
+.if_top
+    LDX #SND_TICK : JSR sound
     DEC bonus_sub : BNE if_tune
     LDA #5 : STA bonus_sub
     SED : LDA stage_bonus : SEC : SBC #1 : STA stage_bonus : CLD
 .if_tune
     JMP tune_step                   ; a tune started by the wave's last kill plays on
+
+.frame_start
+    JSR flush_plots
+    INC frame
+    JMP pulse_capsule
+
+.draw_slot_expl                     ; a formation alien shot: it goes, the explosion shows
+    JSR draw_slot
+    JMP expl_start
 
 .wait_vsync
     LDA #19 : JSR OSBYTE
@@ -674,52 +688,59 @@ GUARD &0DF0
     LDX #0
 .ss_entry
     JSR hs_row
-    LDY #2 : STY tmp2               ; no stage: blue from the first dot, in line with the rest
-    LDA hs_data + 2,X               ; stage reached: a green dot each, then blue
-    BEQ ss_dots
+    LDY #2
+    LDA hs_data + 2,X               ; stage reached: a green square each, then blank
+    BNE ss_stage
+    LDA #'.'                        ; none: dots, after the title's blue
+.ss_none
+    INY : STA (ptr1),Y
+    CPY #HS_DIGITS - 2 : BNE ss_none
+    INY : INY : BNE ss_score        ; past the yellow
+.ss_stage
     CMP #&10 : BCC ss_bin
     SBC #7                          ; BCD 10, 11 and 12+: enough for 12 dots; C set: - 6
 .ss_bin
     ADC #3 : STA tmp2
-.ss_dots
     LDA #TT_GREEN
 .ss_dot
-    CPY tmp2 : BNE ss_put
-    LDA #TT_BLUE
+    CPY tmp2 : BCC ss_put
+    LDA #' '
 .ss_put
     STA (ptr1),Y
-    LDA #'.'
+    LDA #&28                        ; one sixel: a small square
     INY : CPY #HS_DIGITS - 1 : BNE ss_dot
     INY                             ; past the yellow
-    LDA hs_data,X : JSR ss_bcd : INX
-    LDA hs_data,X : JSR ss_bcd : INX
+.ss_score
+    JSR ss_bcd : JSR ss_bcd
     INX
     CPX #HS_ENTRIES * 3 : BNE ss_entry
     RTS
-.ss_bcd                             ; in: A = BCD, Y = screen offset
+.ss_bcd                             ; in: X = the BCD byte's offset, Y = screen offset
+    LDA hs_data,X : INX
     PHA : LSR A : LSR A : LSR A : LSR A
-    ORA #'0' : STA (ptr1),Y : INY
+    JSR ss_digit
     PLA : AND #&0F
+.ss_digit
     ORA #'0' : STA (ptr1),Y : INY
     RTS
 
 ; in: X = entry * 3, out: ptr1 = its row
 .hs_row
-    LDA #LO(MODE7_SCREEN + HS_ROW * 40 + HS_COL) : STA ptr1
     LDA #HI(MODE7_SCREEN + HS_ROW * 40 + HS_COL) : STA ptr1 + 1
-    STX tmp
+    TXA : TAY
+    LDA #(LO(MODE7_SCREEN + HS_ROW * 40 + HS_COL) - 40) AND &FF
 .hr_next
-    LDA tmp : BEQ hr_done
-    SEC : SBC #3 : STA tmp
-    LDA ptr1 : ADC #39 : STA ptr1   ; C set: + 40
-    BCC hr_next
-    INC ptr1 + 1 : BCS hr_next
-.hr_done
+    CLC : ADC #40
+    BCC hr_page
+    INC ptr1 + 1
+.hr_page
+    DEY : DEY : DEY : BPL hr_next
+    STA ptr1
     RTS
+ASSERT LO(MODE7_SCREEN + HS_ROW * 40 + HS_COL) >= 40
 
-; out: hs_new = offset or &FF. A tie goes below the older score
+; out: hs_new = offset or HS_ENTRIES * 3. A tie goes below the older score
 .insert_score
-    LDA #&FF : STA hs_new
     LDX #0
 .is_find
     LDA hs_data,X : CMP score_hi : BCC is_found : BNE is_next
@@ -727,9 +748,9 @@ GUARD &0DF0
 .is_next
     INX : INX : INX
     CPX #HS_ENTRIES * 3 : BNE is_find
-    RTS
 .is_found
     STX hs_new
+    BCS is_ret                      ; C set: none, from the CPX
     TXA : ADC #3 : STA tmp          ; C clear from the BCCs
     LDY #HS_ENTRIES * 3 - 1
 .is_shift
@@ -740,14 +761,15 @@ GUARD &0DF0
     LDA score_hi : STA hs_data,X
     LDA score_lo : STA hs_data + 1,X
     LDA wave : STA hs_data + 2,X
+.is_ret
     RTS
 
 ; X = sound * 4; returns X = the next sound's
 .sound
-    LDY #0
+    LDY #256 - 8
 .snd_copy
-    LDA sfx_data,X : STA sound_blk,Y
-    INX : INY : INY : CPY #8 : BNE snd_copy
+    LDA sfx_data,X : STA sound_blk + 8 - 256,Y
+    INX : INY : INY : BNE snd_copy
     STX sfx_x
     LDX #LO(sound_blk) : LDY #HI(sound_blk) : LDA #7 : JSR OSWORD
     LDX sfx_x
@@ -760,16 +782,9 @@ GUARD &0DF0
     INX : INX : INX : INX
     BNE ps_next
 .ps_play
-    CPX #SND_HIT : BCC ps_one
-    BEQ ps_hit
-    LDX #SND_POWER : LDA #9 : BNE ps_tune
-.ps_hit
-    LDA tune_n : BNE ps_one         ; jingle playing: the zap alone
-    LDA #2
-.ps_tune                            ; tune_step sends a note a frame; a jingle after the hit replaces it
-    STX tune_x : STA tune_n
-    LDX #SND_HIT + 4
-    BNE ps_next
+    CPX #SND_POWER : BNE ps_one
+    STX tune_x : LDA #9 : STA tune_n
+    BNE ps_next                     ; SFX_POWER is the last bit: X is done with
 .ps_one
     JSR sound
 .ps_next
@@ -782,8 +797,17 @@ GUARD &0DF0
     LDX tune_x
 .ts_go
     DEC tune_n
-    JSR sound : STX tune_x
+    JSR sound
+    STX tune_x
 .keyv_none
+    RTS
+
+; 8-bit maximal-length LFSR (x^8 + x^4 + x^3 + x^2 + 1)
+.random
+    LDA rnd : ASL A : BCC rn_done
+    EOR #&1D
+.rn_done
+    STA rnd
     RTS
 
 ; channel (+&10 flush), envelope (or -15..-1 fixed), pitch (noise: type), duration
@@ -792,17 +816,17 @@ GUARD &0DF0
     EQUB &12, 3, 230, 24            ; SFX_DIVE
     EQUB &10, 2, 6, 20              ; SFX_DIE
     EQUB &12, 3, 125, 20            ; SFX_RUMBLE: same channel, so it cuts off a dive
-    EQUB &11, 1, 158, 7             ; SFX_HIT
-    EQUB &10, 2, 7, 7               ; noise pitched by channel 1
-    EQUB &13, 4, 129, 2 : EQUB 3, 4, 149, 2 : EQUB 3, 4, 165, 2     ; the jingle
-    EQUB 3, 4, 149, 2 : EQUB 3, 4, 165, 2 : EQUB 3, 4, 177, 2
-    EQUB 3, 4, 165, 2 : EQUB 3, 4, 177, 2 : EQUB 3, 4, 197, 8
-    EQUB &13, 4, 101, 2 : EQUB 3, 4, 117, 2 : EQUB 3, 4, 129, 2 : EQUB 3, 4, 149, 6
-    EQUB &13, 4, 129, 4 : EQUB 3, 4, 117, 4 : EQUB 3, 4, 105, 4 : EQUB 3, 4, 89, 10
-SND_HIT = 4 * 4
-SND_POWER = 6 * 4
-SND_WAVE = 15 * 4
-SND_OVER = 19 * 4
+    EQUB &12, 4, 172, 8             ; SFX_HIT: Arcadians' warbling tone, cutting off a dive
+    EQUB &13, 2, 129, 2 : EQUB 3, 2, 149, 2 : EQUB 3, 2, 165, 2     ; the jingle
+    EQUB 3, 2, 149, 2 : EQUB 3, 2, 165, 2 : EQUB 3, 2, 177, 2
+    EQUB 3, 2, 165, 2 : EQUB 3, 2, 177, 2 : EQUB 3, 2, 197, 8
+    EQUB &13, 2, 101, 2 : EQUB 3, 2, 117, 2 : EQUB 3, 2, 129, 2 : EQUB 3, 2, 149, 6
+    EQUB &13, 2, 129, 4 : EQUB 3, 2, 117, 4 : EQUB 3, 2, 105, 4 : EQUB 3, 2, 89, 10
+    EQUB &13, 2, TICK_PITCH, 1      ; the stage bonus tick: intro_frame raises its pitch
+SND_POWER = 5 * 4
+SND_WAVE = 14 * 4
+SND_OVER = 18 * 4
+SND_TICK = 22 * 4
 
 .lo_end
 
@@ -935,22 +959,13 @@ ORG &0E00
     EQUB HI(update_abullet_0), HI(update_abullet_1), HI(update_abullet_2)
 
 ; in vblank: in MODE 2 each logical colour is one ULA palette entry, so no plots
-.pulse_flagships
-    LDA frame : LSR A : LSR A : AND #7 : TAX
-    LDA pulse_colours,X : EOR #PULSE_COLOUR * 16 + 7    ; the ULA stores colours inverted
-    JSR pf_set
-    LDA frame : LSR A : LSR A : AND #3 : TAX
-    LDA boss_colours,X : EOR #BOSS_COLOUR * 16 + 7
-.pf_set
+.pulse_capsule                      ; 8 frames each colour
+    LDA frame : LSR A : LSR A : AND #FLAG_FLASH : EOR #FLAG_PHYS
+    EOR #FLAG_COLOUR * 16 + 7       ; the ULA stores colours inverted
     STA ULA_PALETTE
     EOR #STAR_COLOUR * 16           ; and its copy with the star bit set
     STA ULA_PALETTE
     RTS
-
-.pulse_colours
-    EQUB 3, 3, 7, 7, 3, 3, 1, 1
-.boss_colours                       ; never a flagship colour
-    EQUB 2, 2, 6, 6
 
 ; --- Starfield ---
 
@@ -1196,7 +1211,7 @@ ORG &0E00
     JMP draw_bullet
 .ub_move
     LDA bullet_y : CLC : ADC #3 : TAX
-    LDA bullet_y : SEC : SBC #BULLET_SPEED
+    LDA bullet_y : SBC #BULLET_SPEED - 1    ; C clear from the ADC
     JSR beam_guard                  ; old and new positions together
     LDA bullet_y : SEC : SBC #BULLET_SPEED
     CMP #BULLET_TOP : BCC ub_off
@@ -1260,6 +1275,7 @@ ORG &0E00
 .cbh_over                           ; A = 0
     STA diver_state : STA diver_wrap
 .cbh_scored                         ; X = the slot shot, or a wing's index
+    JSR expl_start
     DEC alive_count
     JSR bonus_drop
     SFX SFX_HIT
@@ -1271,10 +1287,23 @@ ORG &0E00
     LDA bullet_y : CLC : ADC #3 : SEC : SBC tmp
     CMP #ALIEN_H + 3 : BCS cn_ret
     STX tmp
-    LDA bullet_x : CLC : ADC #1 : SEC : SBC tmp
+    LDA bullet_x : ADC #1 : SEC : SBC tmp   ; C clear from the BCS
     CMP #ALIEN_W + 1
 .cn_ret
     RTS
+
+.expl_start                        ; at the alien just erased (draw_x, draw_y): A only
+    LDA expl_t : BNE xs_ret        ; one at a time
+    LDA #EXPL_TIME + 1 : STA expl_t   ; update_expl draws it this frame
+    LDA draw_x : CLC : ADC #(ALIEN_W - EXPL_W + 1) DIV 2 : STA expl_x
+    LDA draw_y : STA expl_y
+.xs_ret
+    RTS
+
+.play_tune
+    LDA #0 : STA tune_n             ; they cut off a tune still going out
+    JSR sound : JSR sound : JSR sound
+    JMP sound
 
 ; --- Alien fire ---
 ; alien_fire only decides; an idle enemy bullet draws the shot in beam order
@@ -1332,14 +1361,6 @@ ORG &0E00
     CLC : ADC #ALIEN_MID : STA fire_x,X
     PLA : STA fire_y,X
     INC fire_n
-    RTS
-
-; 8-bit maximal-length LFSR (x^8 + x^4 + x^3 + x^2 + 1)
-.random
-    LDA rnd : ASL A : BCC rn_done
-    EOR #&1D
-.rn_done
-    STA rnd
     RTS
 
 .update_abullet_0
@@ -1756,7 +1777,7 @@ ORG &0E00
     LDA diver_slot : CMP #BOSS_SLOT : BNE um_home
     LDA diver_state : CMP #DIVER_DIVE : BNE um_home
     LDA flank,X : STA wing_tgt,X
-    LDA #0 : BEQ um_tgt_y
+    LDA #ROW_STEP : BNE um_tgt_y    ; a row below the boss, as in formation
 .um_home
     LDA wing_slot,X : TAX : JSR slot_pos : LDX wing_k
     LDA slot_x : SEC : SBC lead_hx : STA wing_tgt,X
@@ -2087,10 +2108,11 @@ NEXT
     LDA (ptr3),Y : AND glyph_mode : EOR nib_r,X : STA (ptr3),Y
     INC glyph_i : INY : CPY #8 : BNE ga_row
     RTS
+GLYPH_BITS = (GLYPH_COLOUR AND 1) + (GLYPH_COLOUR AND 2) * 2 + (GLYPH_COLOUR AND 4) * 4   ; a right-hand pixel
 .nib_l
-FOR n, 0, 15 : EQUB (n DIV 4) * &15 : NEXT
+FOR n, 0, 15 : EQUB (n DIV 4) * GLYPH_BITS : NEXT
 .nib_r
-FOR n, 0, 15 : EQUB (n AND 3) * &15 : NEXT
+FOR n, 0, 15 : EQUB (n AND 3) * GLYPH_BITS : NEXT
 
 ; X/Y = address of a length-prefixed VDU byte string
 .print_vdu
@@ -2107,10 +2129,8 @@ FOR n, 0, 15 : EQUB (n AND 3) * &15 : NEXT
 
 .hs_data                            ; 5 x BCD score high, low, stage reached: none for the defaults
     EQUB &05, &00, 0, &04, &00, 0, &03, &00, 0, &02, &00, 0, &01, &00, 0
-.hs_new                             ; offset of the new score's entry, or &FF
-    EQUB &FF
-.txt_prompts
-    EQUS "PRESS ANY KEY"
+.hs_new                             ; offset of the new score's entry, or HS_ENTRIES * 3
+    EQUB HS_ENTRIES * 3
 .txt_game_over
     EQUB 12, 31, 6, 15 : EQUS "GAME OVER"
 .txt_mode7
@@ -2160,10 +2180,13 @@ FOR b, 0, BREATH_MAX
     NEXT
 NEXT
 .vbreath                            ; [breath * FORM_COLS + row]
+ASSERT FORM_ROWS < FORM_COLS
 FOR b, 0, BREATH_MAX
     FOR r, 0, FORM_COLS - 1
         IF r < FORM_ROWS
             EQUB ((1 + 2 * (2 * r < FORM_ROWS - 1)) * INT(ABS(2 * r - FORM_ROWS + 1) * b * VBREATH_MAX / ((FORM_ROWS - 1) * BREATH_MAX) + 0.5)) AND &FF
+        ELIF r = FORM_ROWS          ; the boss, from row 0's y: a row up, and out further
+            EQUB (INT((FORM_ROWS - 1) * b * VBREATH_MAX / ((FORM_ROWS - 1) * BREATH_MAX) + 0.5) - INT((FORM_ROWS + 1) * b * VBREATH_MAX / ((FORM_ROWS - 1) * BREATH_MAX) + 0.5) - ROW_STEP) AND &FF
         ELSE
             EQUB 0
         ENDIF
@@ -2276,24 +2299,25 @@ ENDMACRO
 ; Logical colours: 1 red, 2 pulsing yellow, 3 the boss's flashing, 4 blue, 5 magenta, 6 cyan, 7 white
 ART_PLAYER = "00077000" + "00077000" + "00777700" + "06755760" + "66777766" + "67777776" + "60077006" + "00500500"
 ART_BULLET = "77" + "77" + "77" + "77"
-ART_BULLET_STEP = "77" + "77" + "77" + "77" + "77" + "77" + "77" + "77"
+ART_BULLET_STEP = "77777777" + STRING$(BULLET_SPEED - 4, "00") + "77777777"
 ART_ABULLET = "1" + "7" + "7" + "7"
 ART_BONUS   = "0222220" + "2244422" + "2242422" + "2244422" + "2242222" + "2242222" + "0222220" + "0000000"
-ART_FLAGSHIP   = "4000220004" + "4002222004" + "4122112214" + "4121111214" + "4441111444" + "0440110440" + "0000110000" + "0000110000"
-ART_FLAGSHIP_B = "0000220000" + "4002222004" + "4122112214" + "4121111214" + "4441111444" + "4440110444" + "0000110000" + "0000110000"
+ART_FLAGSHIP   = "0000110000" + "0006666000" + "7706006077" + "7776666777" + "0776006770" + "0006666000" + "0061661600" + "0060000600"
+ART_FLAGSHIP_B = "7700110077" + "7776666777" + "0776006770" + "0006666000" + "0006006000" + "0006666000" + "0061661600" + "0060000600"
 ART_ESCORT     = "0000110000" + "0001111000" + "5017117105" + "5111111115" + "5011111105" + "5001111005" + "5000110005" + "5500000055"
 ART_ESCORT_B   = "0000110000" + "5001111005" + "5117117115" + "5111111115" + "0511111150" + "0011111100" + "0001111000" + "0000110000"
-ART_BOSS       = "0303003030" + "0333333330" + "3177117713" + "3171111713" + "3331111333" + "0330110330" + "0000110000" + "0000110000"
+ART_EXPL      = "1002001" + "0207020" + "0027200" + "2777772" + "0027200" + "0207020" + "1002001" + "0000000"
+ART_BOSS       = "4000330004" + "4003333004" + "4133113314" + "4131111314" + "4441111444" + "0440110440" + "0000110000" + "0000110000"
 ART_DRONE      = "0400000040" + "0040000400" + "0055555500" + "0574554750" + "6555555556" + "6056556506" + "6060000606" + "0606006060"
 ART_DRONE_B    = "0040000400" + "0040000400" + "6055555506" + "6574554756" + "0555555550" + "0056556500" + "0606006060" + "6006006006"
 
 .gfx_player       : IMAGES ART_PLAYER, 8, 8
 .gfx_player_d     : DELTAS ART_PLAYER, ART_PLAYER, 8, 8
 .gfx_bullet       : IMAGES ART_BULLET, 2, 4
-.gfx_bullet_step  : IMAGES ART_BULLET_STEP, 2, 8
+.gfx_bullet_step  : IMAGES ART_BULLET_STEP, 2, 4 + BULLET_SPEED
 .gfx_abullet      : IMAGES ART_ABULLET, 1, 4
 .gfx_abullet_step : VDELTAS ART_ABULLET, 1, 4, ABULLET_SPEED
-.gfx_bonus_0      : IMAGE ART_BONUS, BONUS_W, ALIEN_H, 0  ; shift 1 is in the hi block
+.gfx_bonus_0      : IMAGE ART_BONUS, BONUS_W, ALIEN_H, 0  ; bonus_x is even: no shift 1
 .gfx_flagship     : IMAGES ART_FLAGSHIP, ALIEN_W, ALIEN_H
 .gfx_flagship_d   : DELTAS ART_FLAGSHIP, ART_FLAGSHIP, ALIEN_W, ALIEN_H
 .gfx_flagship_b   : IMAGES ART_FLAGSHIP_B, ALIEN_W, ALIEN_H
@@ -2333,11 +2357,11 @@ ART_DRONE_B    = "0040000400" + "0040000400" + "6055555506" + "6574554756" + "05
 .gfx_boss         : IMAGES ART_BOSS, ALIEN_W, ALIEN_H
 
 ; ids: 0 player, 1 bullet, 2-7 aliens, 8 bullet step, 9 enemy bullet, 10 its step,
-;      11 capsule, 12 boss; deltas: 11-16 cross, 17-22 vertical, 23-34 diagonal
+;      11 capsule, 12 boss, 13 explosion; deltas: 11-16 cross, 17-22 vertical, 23-34 diagonal
 .spr_h
     EQUB 8, 4
     FOR i, 2, 7 : EQUB ALIEN_H : NEXT
-    EQUB 8, 4, 4 + ABULLET_SPEED
+    EQUB 4 + BULLET_SPEED, 4, 4 + ABULLET_SPEED
     FOR i, 11, 16 : EQUB ALIEN_H : NEXT
     FOR i, 17, 34 : EQUB ALIEN_H + 1 : NEXT
 .img_lo
@@ -2345,19 +2369,21 @@ ART_DRONE_B    = "0040000400" + "0040000400" + "6055555506" + "6574554756" + "05
     IMG_LO gfx_flagship, ALIEN_W, ALIEN_H : IMG_LO gfx_flagship_b, ALIEN_W, ALIEN_H
     IMG_LO gfx_escort, ALIEN_W, ALIEN_H : IMG_LO gfx_escort_b, ALIEN_W, ALIEN_H
     IMG_LO gfx_drone, ALIEN_W, ALIEN_H : IMG_LO gfx_drone_b, ALIEN_W, ALIEN_H
-    IMG_LO gfx_bullet_step, 2, 8
+    IMG_LO gfx_bullet_step, 2, 4 + BULLET_SPEED
     IMG_LO gfx_abullet, 1, 4 : IMG_LO gfx_abullet_step, 1, 4 + ABULLET_SPEED
-    EQUB LO(gfx_bonus_0), LO(gfx_bonus_1)
+    EQUB LO(gfx_bonus_0), LO(gfx_bonus_0)
     IMG_LO gfx_boss, ALIEN_W, ALIEN_H
+    EQUB LO(gfx_expl), LO(gfx_expl)   ; either shift: it never moves
 .img_hi
     IMG_HI gfx_player, 8, 8 : IMG_HI gfx_bullet, 2, 4
     IMG_HI gfx_flagship, ALIEN_W, ALIEN_H : IMG_HI gfx_flagship_b, ALIEN_W, ALIEN_H
     IMG_HI gfx_escort, ALIEN_W, ALIEN_H : IMG_HI gfx_escort_b, ALIEN_W, ALIEN_H
     IMG_HI gfx_drone, ALIEN_W, ALIEN_H : IMG_HI gfx_drone_b, ALIEN_W, ALIEN_H
-    IMG_HI gfx_bullet_step, 2, 8
+    IMG_HI gfx_bullet_step, 2, 4 + BULLET_SPEED
     IMG_HI gfx_abullet, 1, 4 : IMG_HI gfx_abullet_step, 1, 4 + ABULLET_SPEED
-    EQUB HI(gfx_bonus_0), HI(gfx_bonus_1)
+    EQUB HI(gfx_bonus_0), HI(gfx_bonus_0)
     IMG_HI gfx_boss, ALIEN_W, ALIEN_H
+    EQUB HI(gfx_expl), HI(gfx_expl)
 .img_entry
     IMG_ENTRY 8 : IMG_ENTRY 2
     IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W
@@ -2365,6 +2391,7 @@ ART_DRONE_B    = "0040000400" + "0040000400" + "6055555506" + "6574554756" + "05
     IMG_ENTRY 1 : IMG_ENTRY 1
     IMG_ENTRY BONUS_W
     IMG_ENTRY ALIEN_W
+    IMG_ENTRY EXPL_W
 .dlt_lo
     DLT_LO gfx_player_d, 8, 8 : EQUB 0, 0
     DLT_LO gfx_flagship_d, ALIEN_W, ALIEN_H : DLT_LO gfx_flagship_b_d, ALIEN_W, ALIEN_H
@@ -2412,7 +2439,8 @@ ART_DRONE_B    = "0040000400" + "0040000400" + "6055555506" + "6574554756" + "05
 .ula_setup                          ; logical * 16 + physical EOR 7
     EQUB STAR_COLOUR * 16 + (7 EOR 7)
     EQUB 9 * 16 + (1 EOR 7)         ; 9-15: a sprite colour over a star shows the sprite
-    FOR c, 12, 15 : EQUB c * 16 + ((c - 8) EOR 7) : NEXT   ; 2, 3, 10 and 11: pulse_flagships
+    FOR c, 12, 15 : EQUB c * 16 + ((c - 8) EOR 7) : NEXT   ; 2 and 10: pulse_capsule
+    EQUB BOSS_COLOUR * 16 + (BOSS_PHYS EOR 7), (BOSS_COLOUR + 8) * 16 + (BOSS_PHYS EOR 7)
 .ula_setup_end
 .vdu_setup
     EQUB vdu_setup_end - vdu_setup - 1
@@ -2430,27 +2458,12 @@ ORG state_end
 GUARD &0800
 .hi_start
 
-; the beam is past the shot alien's rows, so past the capsule's: it starts above them
-.bonus_drop                         ; X = the slot shot (or a wing)
-    CPX #BOSS_SLOT : BNE bn_ret
-    LDA power : ORA bonus_on : ORA bullets_on + 1 : BNE bn_ret
-    LDA alive_count : BEQ bn_ret    ; the wave's last alien: the stage ends
-    LDA #2 : STA bonus_on
-    LDA bullet_x : SEC : SBC #(BONUS_W - 1) DIV 2 : STA bonus_x
-    LDA hit_y : CMP #DIVER_TOP + BONUS_LIFT : BCS bn_lift
-    LDA #DIVER_TOP + BONUS_LIFT + 1 ; carry clear: SBC takes 1 more
-.bn_lift
-    SBC #BONUS_LIFT : STA bonus_y
-    JMP bonus_draw
-.bn_ret
-    RTS
-
 .update_bonus
     LDA bonus_on : CMP #2 : BNE ubn_move
     DEC bonus_on
     RTS
 .ubn_move
-    LDA bonus_y : CLC : ADC #ALIEN_H : TAX
+    LDA bonus_y : ADC #ALIEN_H : TAX   ; C clear: bonus_on was 1
     LDA bonus_y : JSR beam_guard    ; old and new positions together
     JSR bonus_draw
     INC bonus_y
@@ -2458,24 +2471,31 @@ GUARD &0800
     LDX player_state : BNE bonus_draw
     CMP #PLAYER_Y - 6 : BCC bonus_draw
     CMP #PLAYER_Y + 8 : BCS bonus_draw
-    LDA bonus_x : SEC : SBC player_x : CLC : ADC #BONUS_W - 1
+    LDA player_x : SBC bonus_x : CLC : ADC #8   ; C clear from the BCS: x - capsule x - 1 + 8
     CMP #BONUS_W + 7 : BCS bonus_draw
     INC power
     SFX SFX_POWER
 .ubn_off
     LDA #0 : STA bonus_on
+.bn_ret
     RTS
 
+; the beam is past the shot alien's rows, so past the capsule's: it starts above them
+.bonus_drop                         ; X = the slot shot (or a wing)
+    CPX #BOSS_SLOT : BNE bn_ret
+    LDA power : ORA bonus_on : ORA bullets_on + 1 : BNE bn_ret
+    LDA alive_count : BEQ bn_ret    ; the wave's last alien: the stage ends
+    LDA #2 : STA bonus_on
+    LDA bullet_x : SBC #(BONUS_W - 1) DIV 2 : AND #&FE : STA bonus_x   ; C set by the CPX; even: one image
+    LDA hit_y : CMP #DIVER_TOP + BONUS_LIFT : BCS bn_lift
+    LDA #DIVER_TOP + BONUS_LIFT + 1 ; carry clear: SBC takes 1 more
+.bn_lift
+    SBC #BONUS_LIFT : STA bonus_y
 .bonus_draw
     LDA #SPR_BONUS : STA draw_id
     LDA bonus_x : STA draw_x
     LDA bonus_y : STA draw_y
     JMP plot_image
-
-.play_tune
-    LDA #0 : STA tune_n             ; they cut off a tune still going out
-    JSR sound : JSR sound : JSR sound
-    JMP sound
 
 ; Each guard fires once, and only if its shot won't pass over the boss or the other
 ; guard (checked even once shot: their path flies on).
@@ -2487,7 +2507,7 @@ GUARD &0800
     LDA afb_x : JSR af_range : BCC afg_no
     LDA wing_ox,Y : JSR afb_clear : BCC afg_no     ; the boss
     TYA : EOR #1 : TAX
-    LDA wing_ox,Y : SEC : SBC wing_ox,X
+    LDA wing_ox,Y : SBC wing_ox,X   ; C set by afb_clear
     JSR afb_clear : BCC afg_no      ; the other guard
     LDA #1 : STA wing_shot,Y
     LDX afb_x : JMP af_q
@@ -2495,7 +2515,28 @@ GUARD &0800
     PLA
     RTS
 
-.gfx_bonus_1 : IMAGE ART_BONUS, BONUS_W, ALIEN_H, 1   ; shift 0 is in the main block
+; --- Explosion ---
+
+.expl_clear                        ; the wave is over: the explosion goes now
+    LDA expl_t : BEQ ux_ret
+    LDA #1 : STA expl_t
+.update_expl                       ; after the sprites (defer 0): drawn, then erased EXPL_TIME on
+    LDX expl_t : BEQ ux_ret
+    DEX : STX expl_t : BEQ ux_plot
+    CPX #EXPL_TIME : BNE ux_ret
+.ux_plot
+    LDA expl_y : CMP #DEFER_Y : ROL defer      ; low: queued, drawn ahead of the beam next frame
+    ADC #ALIEN_H - 1 : TAX : JSR beam_guard     ; carry clear: defer was 0
+    LDA expl_x : STA draw_x
+    LDA expl_y : STA draw_y
+    LDA #SPR_EXPL : STA draw_id
+    JSR plot_image
+    LSR defer
+.ux_ret
+    RTS
+
+.gfx_expl : IMAGE ART_EXPL, EXPL_W, ALIEN_H, 0
+
 INCLUDE "title.asm"
 .hi_end
 
@@ -2538,7 +2579,7 @@ GUARD &01C3
     JSR kill_bullet
     LDX loop_i : JSR slot_pos : LDA slot_y : TAX : JSR beam_guard_alien
     LDX loop_i
-    JSR draw_slot
+    JSR draw_slot_expl
     LDX loop_i : LDA #ALIVE_GONE : STA alive,X
     DEC alive_count
     SFX SFX_HIT
@@ -2592,7 +2633,8 @@ GUARD &03E0
     CPX #BOSS_SLOT : BNE slot_pos
 .boss_pos
     LDA row_x : CLC : ADC #BOSS_DX : STA slot_x
-    LDA row_y : SEC : SBC #ROW_STEP : STA slot_y
+    LDY row_bofs                    ; a row above row 0: it breathes further
+    LDA row_y : ADC vbreath + FORM_ROWS,Y : STA slot_y      ; C clear from the ADC
     RTS
 
 ; X = slot, preserved; out: slot_x / slot_y
@@ -2610,7 +2652,7 @@ GUARD &03E0
     RTS
 
 .txt_hud
-    EQUB 6, 17, 7, 31, 4, 0 : EQUS "0"
+    EQUB 6, 17, GLYPH_COLOUR, 31, 4, 0 : EQUS "0"
 
 .b2_end
 
@@ -2713,6 +2755,7 @@ ORG LOADER
 FOR i, 1, 7, 2                      ; every amplitude is an envelope: OSWORD 7's high bytes 0
     STA sound_blk + i
 NEXT
+    STA expl_t                     ; no explosion showing
     LDA #&07 : STA bg_colour        ; black (the ULA stores colours inverted)
 FOR e, 0, 3                         ; envelopes 1-4: the OS keeps them at &08C0
     LDX #LO(envelopes + 14 * e) : LDY #HI(envelopes + 14 * e) : LDA #8 : JSR OSWORD
@@ -2746,10 +2789,9 @@ NEXT
 ; then amplitude: attack, decay, sustain, release rates, attack and decay levels
 .envelopes
     EQUB 1, 129, -8, -3, 0, 8, 27, 0, 126, -12, 0, -12, 126, 0       ; fire: a falling zap
-                                    ; its silent tail keeps falling for the hit's noise
     EQUB 2, 1, 0, 0, 0, 0, 0, 0, 126, -3, -1, -6, 126, 80
     EQUB 3, 130, -2, 0, 0, 60, 0, 0, 60, -1, 0, -4, 60, 59           ; dive: a falling whistle
-    EQUB 4, 1, 0, 0, 0, 0, 0, 0, 126, -8, -2, -10, 110, 60
+    EQUB 4, &83, 3, -9, 8, 5, 4, 10, 126, -3, 0, -10, 126, 100      ; hit: Arcadians' enemy explosion
 .loader_end
 ; The file image after the loader: the &0900 block, then these, in MOVE's order
 IMG_HI = loader_end + lo_end - lo_start
