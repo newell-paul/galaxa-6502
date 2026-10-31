@@ -189,7 +189,8 @@ BANNER_COL   = 7
 BANNER_TIME  = 100            ; frames it shows
 DROP_Y       = 8              ; each row of a new wave appears here, then drops into place
 ORDER_N      = 4 + ABULLETS   ; beam-order entries: formation, 2 bullets, diver, enemy bullets
-DEFER_Y      = 144            ; objects this low draw at the next frame's start instead
+DEFER_Y      = 112            ; objects this low draw at the next frame's start instead
+EARLY_Y      = 144            ; and objects this low update before the rest
 QUEUE_MAX    = 24             ; deferred plots per frame
 
 ALIVE_GONE   = 0              ; alive[] states
@@ -262,6 +263,8 @@ bonus_on     = &84            ; the capsule: 0 none, 1 falling, 2 just dropped (
 bonus_x      = &85
 bonus_y      = &86
 dive_kills   = &87            ; swooping aliens shot towards the next capsule
+tune_x       = &88            ; the tune being played: its next note in sfx_data
+tune_n       = &89            ; and notes still to send, one a frame
 ptr1         = ptr0 + 2
 ptr2         = ptr0 + 4
 ptr3         = ptr0 + 6
@@ -417,7 +420,7 @@ GUARD &0DF0                         ; characters 224-255) and the disc NMI code:
     JSR init_stars
     LDX #LO(txt_hud) : LDY #HI(txt_hud) : JSR print_vdu
     JSR print_hud
-    LDA #0 : STA keys : STA fire_cool : STA defer : STA queue_n : STA sfx
+    LDA #0 : STA keys : STA fire_cool : STA defer : STA queue_n : STA sfx : STA tune_n
     STA ships_shown : STA player_state
     STA power : STA bonus_on : STA dive_kills
     STA bullets_on : STA bullets_on + 1   ; CLS has wiped them
@@ -544,7 +547,8 @@ GUARD &0DF0                         ; characters 224-255) and the disc NMI code:
     INC frame
     JSR pulse_flagships
     JSR read_keys
-    JMP update_player
+    JSR update_player
+    JMP tune_step                   ; a hit tune started by the wave's last kill goes on
 
 .wait_vsync
     LDA #19 : JSR OSBYTE
@@ -595,8 +599,7 @@ NEXT
 .dr_col
     LDX loop_i
     LDA alive,X : BEQ dr_col_next
-    JSR slot_pos
-    LDA slot_x : STA draw_x
+    LDA slot_px,X : CLC : ADC #FX_START : STA draw_x  ; slot_pos while dropping: row_x = FX_START, no breath
     JSR plot_delta
 .dr_col_next
     INC loop_i
@@ -715,12 +718,7 @@ NEXT
     LDY #0
 .snd_copy
     LDA sfx_data,X : STA sound_blk,Y
-    LDA #0
-    CPY #2 : BNE snd_hi
-    LDA sfx_data,X : ASL A          ; amplitude -15..-1 (a fixed loudness): high byte &FF
-    LDA #&FF : ADC #0 : EOR #&FF
-.snd_hi
-    STA sound_blk + 1,Y
+    LDA #0 : STA sound_blk + 1,Y    ; every amplitude is an envelope: high bytes 0
     INX : INY : INY : CPY #8 : BNE snd_copy
     STX sfx_x
     LDX #LO(sound_blk) : LDY #HI(sound_blk) : LDA #7 : JSR OSWORD
@@ -735,19 +733,25 @@ NEXT
     BNE ps_next
 .ps_play
     CPX #SND_HIT : BCC ps_one
-    BNE ps_power
-    JSR sound : JSR sound : JSR sound   ; the hit tune: the jingle can follow it
+    BEQ ps_tune
+    LDX #SND_POWER
+.ps_tune                            ; a tune: tune_step sends a note a frame, well before
+    STX tune_x : LDA #4 : STA tune_n    ; the last one ends. A jingle straight after the hit
+    LDX #SND_HIT + 4                ; tune replaces it: its first note cuts the tune off
+    BNE ps_next
 .ps_one
     JSR sound
 .ps_next
     LDA sfx : BNE ps_bit
-    RTS
-
+.tune_step
+    LDA tune_n : BEQ keyv_none
+    DEC tune_n
+    LDX tune_x : JSR sound : STX tune_x
 .keyv_none
     RTS
-.ps_power
-    LDX #SND_POWER
+
 .play_tune                          ; four notes, queued
+    LDA #0 : STA tune_n             ; they cut off a tune still going out
     JSR sound : JSR sound : JSR sound
     JMP sound
 
@@ -786,8 +790,6 @@ SND_OVER = 16 * 4
 
 .txt_hud                            ; digits are drawn by print_hud
     EQUB 6, 17, 7, 31, 4, 0 : EQUS "0"
-.txt_game_over
-    EQUB 12, 31, 6, 15 : EQUS "GAME OVER"
 
 .lo_end
 
@@ -869,7 +871,7 @@ ORG &0E00
     INC defer
     LDY #ORDER_N - 1
 .ubo_low
-    LDA order_key,Y : CMP #DEFER_Y : BCC ubo_low_next
+    LDA order_key,Y : CMP #EARLY_Y : BCC ubo_low_next
     CMP #&FF : BEQ ubo_low_next
     LDA #&FF : STA order_key,Y
     STY order_idx
@@ -887,10 +889,14 @@ ORG &0E00
 .ubo_skip
     DEX : BPL ubo_scan
     LDA tmp : CMP #&FF : BEQ ubo_rest
+    CMP #DEFER_Y : BCC ubo_now      ; low: queued, and so is everything after it
+    STA defer
+.ubo_now
     LDA #&FF : STA order_key,Y
     JSR ubo_run
     JMP ubo_next
 .ubo_rest                           ; then the idle ones, which may fire
+    LDA #0 : STA defer
     LDY #ORDER_N - 1
 .ubo_idle
     LDA order_done : AND bit_of,Y : BNE ubo_idle_next
@@ -940,36 +946,47 @@ ORG &0E00
     LDA #&40 : BNE us_begin
 .update_stars                       ; every star
     LDA #0
-.us_begin
+.us_begin                           ; stars 0-9 move 2px a frame, 10-19 1px, 20-29 1px on even frames
     STA tmp2
+    LDA #0 : STA ptr0               ; ptr0 = star_hi * 256, Y = star_lo
     LDX #NUM_STARS - 1
-    LDY #0
+    LDA frame : LSR A : BCC us_star
+    LDX #2 * NUM_STARS / 3 - 1
 .us_star
-    LDA frame : AND star_rate,X : BNE us_skip
     BIT tmp2 : BMI us_top : BVC us_go
     LDA frame : CMP star_done,X : BNE us_go
-.us_skip
-    JMP us_next
+    BEQ us_next
 .us_top
     LDA star_y,X : CMP #STAR_BAND : BCC us_mark
-    CMP #256 - 2 : BCC us_skip      ; 2px a frame at most
+    CMP #256 - 2 : BCC us_next      ; 2px a frame at most
 .us_mark
     LDA frame : STA star_done,X
 .us_go
-    LDA star_lo,X : STA ptr0 : LDA star_hi,X : STA ptr0 + 1
+    LDA star_hi,X : STA ptr0 + 1
+    LDY star_lo,X
     LDA (ptr0),Y : EOR star_vis,X : STA (ptr0),Y        ; erase
-    LDA star_dy,X : STA tmp
-.us_step                            ; a pixel row at a time
+    CPX #NUM_STARS / 3 : BCS us_one
     INC star_y,X : BEQ us_wrap
-    LDA star_y,X : AND #7 : BEQ us_cell
-    INC ptr0                        ; next row of the same character cell
-    JMP us_more
-.us_cell                            ; top row of the next character row
-    LDA ptr0 : CLC : ADC #LO(640 - 7) : STA ptr0
+    LDA star_y,X : AND #7 : BEQ us_cell2
+    INY
+.us_one
+    INC star_y,X : BEQ us_wrap
+    LDA star_y,X : AND #7 : BEQ us_cell1
+    INY
+.us_draw
+    TYA : STA star_lo,X
+    LDA (ptr0),Y : EOR star_vis,X : STA (ptr0),Y        ; draw
+.us_next
+    DEX : BPL us_star
+    RTS
+.us_cell2
+    JSR us_cell : JMP us_one
+.us_cell1
+    JSR us_cell : JMP us_draw
+.us_cell                            ; row 7 to the top row of the next character row
+    TYA : CLC : ADC #LO(640 - 7) : TAY
     LDA ptr0 + 1 : ADC #HI(640 - 7) : STA ptr0 + 1 : STA star_hi,X
-.us_more
-    DEC tmp : BNE us_step
-    JMP us_draw
+    RTS
 .us_wrap
     LDA #STAR_TOP : STA star_y,X
     LDA star_x,X : CLC : ADC #STAR_X_STEP : CMP #160 : BCC us_x
@@ -977,16 +994,10 @@ ORG &0E00
 .us_x
     STA star_x,X
     JSR star_place
+    LDY ptr0 : LDA #0 : STA ptr0
     LDA star_vis,X : BEQ us_draw    ; twinkled out: stays out
     LDA star_bit,X : STA star_vis,X
-.us_draw
-    LDA ptr0 : STA star_lo,X
-    LDA (ptr0),Y : EOR star_vis,X : STA (ptr0),Y        ; draw
-.us_next
-    DEX : BMI us_done
-    JMP us_star
-.us_done
-    RTS
+    JMP us_draw
 
 ; Every TWINKLE_RATE frames, bring back the two stars that are out and blink out the
 ; next two.
@@ -1001,10 +1012,10 @@ ORG &0E00
 .ts_done
     RTS
 
-; Toggle stars twinkle_i and twinkle_i + NUM_STARS / 2.
+; Toggle stars twinkle_i and twinkle_i + NUM_STARS / 2, in the order before grouping.
 .twinkle_pair
-    LDX twinkle_i : JSR star_toggle
-    LDA twinkle_i : CLC : ADC #NUM_STARS / 2 : TAX
+    LDX twinkle_i : LDA star_of,X : TAX : JSR star_toggle
+    TXA : CLC : ADC #NUM_STARS / 6 : TAX    ; the same speed group: 5 on
     ; fall through
 
 ; X = star. Flip its pixel and whether it is shown.
@@ -1019,14 +1030,15 @@ ORG &0E00
 ; Y = 0. star_vis is left alone.
 .star_place
     LDA star_y,X : LSR A : LSR A : LSR A : TAY
-    LDA crow_lo,Y : STA ptr0 : LDA crow_hi,Y : STA ptr0 + 1
-    LDA star_x,X : LSR A : TAY
+    LDA star_x,X : LSR A
     LDA #&80 : BCC spl_left         ; odd x: the right pixel
     LSR A
 .spl_left
     STA star_bit,X
-    LDA ptr0 : CLC : ADC col8_lo,Y : STA ptr0
-    LDA ptr0 + 1 : ADC col8_hi,Y : STA ptr0 + 1 : STA star_hi,X
+    LDA star_x,X : ROL A : ROL A : ROL A : AND #3 : STA tmp   ; as screen_ptrs
+    LDA star_x,X : AND #&3E : ASL A : ASL A
+    ADC crow_lo,Y : STA ptr0
+    LDA crow_hi,Y : ADC tmp : STA ptr0 + 1 : STA star_hi,X
     LDA star_y,X : AND #7 : ORA ptr0 : STA ptr0 : STA star_lo,X  ; cell addresses are multiples of 8
     LDY #0
     RTS
@@ -1270,8 +1282,6 @@ ORG &0E00
     DEC alive_count
     SFX SFX_HIT
     LDA #&01 : JMP add_score        ; 10 points
-.cbh_none
-    RTS
 
 ; beam_guard for an alien-high object: A = top row of one position, X = top row of another.
 .beam_guard_alien
@@ -1351,7 +1361,13 @@ ORG &0E00
     LDA #1 : STA abullets_on,X
     LDA afire_y : STA abullets_y,X
     JSR abullet_pos
-    LDA draw_y : CLC : ADC #3 : TAX : JSR beam_guard
+    CMP #DEFER_Y : BCC ua_now       ; A = draw_y
+    INC defer                       ; low: queued, drawn at the next frame's start
+    JSR abullet_draw
+    DEC defer
+    RTS
+.ua_now
+    CLC : ADC #3 : TAX : JSR beam_guard
     JMP abullet_draw
 .ua_wing
     LDA wing_req : BEQ ua_done
@@ -1692,8 +1708,7 @@ ORG &0E00
 ; to DIVER_TOP straight after vsync, while the beam is above both positions. Chasing
 ; the beam to the bottom instead would leave no time before the next vsync. The diver
 ; still takes its normal step later this frame, so it never pauses on screen.
-.diver_reenter
-    LDA diver_wrap : BEQ dr_done
+.diver_reenter                      ; only called with diver_wrap set
     LDA #0 : STA diver_wrap
     LDA diver_y : PHA
     LDA #DIVER_TOP : STA diver_y
@@ -1701,8 +1716,6 @@ ORG &0E00
     PLA : STA diver_y
     JSR draw_pair                   ; erase at the bottom
     LDA #DIVER_TOP : STA diver_y
-    RTS
-.dr_done
     RTS
 
 .draw_pair
@@ -1825,17 +1838,17 @@ ORG &0E00
     LDA PL_COL0 + 2 : STA pl_last_hi
     CLC
 FOR c, 1, SPR_BYTES - 1
-    LDA PL_COL0 - 7 * (c - 1) + 1 : ADC draw_h : STA PL_COL0 - 7 * c + 1
-    LDA PL_COL0 - 7 * (c - 1) + 2 : ADC #0 : STA PL_COL0 - 7 * c + 2
+    LDA PL_COL0 - 9 * (c - 1) + 1 : ADC draw_h : STA PL_COL0 - 9 * c + 1
+    LDA PL_COL0 - 9 * (c - 1) + 2 : ADC #0 : STA PL_COL0 - 9 * c + 2
 NEXT
 .pl_patched
     JSR screen_ptrs
     LDX #0
 .pl_row
     JMP &FFFF                       ; patched: the image's last column
-.pl_col                             ; 7 bytes per column, last column first
+.pl_col                             ; 9 bytes per column, last column first
 FOR c, SPR_BYTES - 1, 0, -1
-    LDA &FFFF,X : EOR (ptr0 + 2 * c),Y : STA (ptr0 + 2 * c),Y
+    LDA &FFFF,X : BEQ P% + 6 : EOR (ptr0 + 2 * c),Y : STA (ptr0 + 2 * c),Y   ; a zero byte changes nothing
 NEXT
     INX : CPX draw_h : BEQ pl_done
     INY : CPY #8 : BNE pl_row
@@ -1843,16 +1856,16 @@ NEXT
     JMP pl_row
 .pl_done
     RTS
-PL_COL0 = pl_col + 7 * (SPR_BYTES - 1)  ; column 0's LDA
+PL_COL0 = pl_col + 9 * (SPR_BYTES - 1)  ; column 0's LDA
 
 ; ptr0.. = the character cells holding byte columns draw_x DIV 2 .. + SPR_BYTES - 1 on the
 ; character row containing draw_y; Y = draw_y AND 7, the row inside the cell.
 .screen_ptrs
     LDA draw_y : LSR A : LSR A : LSR A : TAY
-    LDA draw_x : LSR A : TAX
-    CLC
-    LDA crow_lo,Y : ADC col8_lo,X : STA ptr0
-    LDA crow_hi,Y : ADC col8_hi,X : STA ptr0 + 1
+    LDA draw_x : ROL A : ROL A : ROL A : AND #3 : STA tmp     ; draw_x DIV 64: the byte column * 8, high
+    LDA draw_x : AND #&3E : ASL A : ASL A                     ; and low; carry clear (x < 160)
+    ADC crow_lo,Y : STA ptr0
+    LDA crow_hi,Y : ADC tmp : STA ptr0 + 1
 FOR c, 1, SPR_BYTES - 1
     LDA ptr0 : ADC #8 * c : STA ptr0 + 2 * c
     LDA ptr0 + 1 : ADC #0 : STA ptr0 + 2 * c + 1
@@ -1861,12 +1874,12 @@ NEXT
     RTS
 
 ; Step ptr0.. down one character row (640 bytes); Y = 0, the top row of the cell.
-.next_cell
-    LDY #2 * SPR_BYTES - 2
-.nc_loop
-    LDA ptr0,Y : CLC : ADC #LO(640) : STA ptr0,Y
-    LDA ptr0 + 1,Y : ADC #HI(640) : STA ptr0 + 1,Y
-    DEY : DEY : BPL nc_loop
+.next_cell                          ; unrolled: ptr0,Y would be absolute,Y
+    CLC                             ; the high bytes never carry: screen < &8000
+FOR c, 0, SPR_BYTES - 1
+    LDA ptr0 + 2 * c : ADC #LO(640) : STA ptr0 + 2 * c
+    LDA ptr0 + 2 * c + 1 : ADC #HI(640) : STA ptr0 + 2 * c + 1
+NEXT
     LDY #0
     RTS
 
@@ -1984,34 +1997,28 @@ INCLUDE "title.asm"
 .txt_prompts
     EQUS "PRESS ANY KEY"
     EQUS "TYPE INITIALS"
+.txt_game_over
+    EQUB 12, 31, 6, 15 : EQUS "GAME OVER"
 .txt_mode7
     EQUB 12, 22, 7, 23, 1, 0, 0, 0, 0, 0, 0, 0, 0      ; MODE 7, cursor off
 
-; Screen address of each character row, and the offset of each byte column in it
+; Screen address of each character row
 .crow_lo
 FOR r, 0, 31 : EQUB LO(SCREEN + r * 640) : NEXT
 .crow_hi
 FOR r, 0, 31 : EQUB HI(SCREEN + r * 640) : NEXT
-.col8_lo
-FOR c, 0, 79 : EQUB LO(c * 8) : NEXT
-.col8_hi
-FOR c, 0, 79 : EQUB HI(c * 8) : NEXT
 
 ; Formation slot layout, slot = row * FORM_COLS + col
 .slot_px
 FOR i, 0, FORM_COUNT - 1 : EQUB (i MOD FORM_COLS) * COL_STEP : NEXT
-.slot_py
-FOR i, 0, FORM_COUNT - 1 : EQUB FORM_Y + (i DIV FORM_COLS) * ROW_STEP : NEXT
 .slot_row
 FOR i, 0, FORM_COUNT - 1 : EQUB i DIV FORM_COLS : NEXT
-.star_rate                          ; frame mask: the star moves when frame AND this = 0
-FOR i, 0, NUM_STARS - 1 : EQUB -(i MOD 3 = 2) : NEXT
-.star_dy                            ; pixel rows per move
-FOR i, 0, NUM_STARS - 1 : EQUB 1 - (i MOD 3 = 0) : NEXT
+.star_of                            ; star j for i < NUM_STARS / 2: i = 3 * (j MOD 10) + j DIV 10
+FOR i, 0, NUM_STARS / 2 - 1 : EQUB 10 * (i MOD 3) + i DIV 3 : NEXT
 .star_x0
-FOR i, 0, NUM_STARS - 1 : EQUB (i * 135 + i * i * 10 + 7) MOD 160 : NEXT    ; quadratic: no lines
+FOR j, 0, NUM_STARS - 1 : i = 3 * (j MOD 10) + j DIV 10 : EQUB (i * 135 + i * i * 10 + 7) MOD 160 : NEXT    ; quadratic: no lines
 .star_y0
-FOR i, 0, NUM_STARS - 1 : EQUB STAR_TOP + (i * 189 + i * i * 8) MOD (256 - STAR_TOP) : NEXT
+FOR j, 0, NUM_STARS - 1 : i = 3 * (j MOD 10) + j DIV 10 : EQUB STAR_TOP + (i * 189 + i * i * 8) MOD (256 - STAR_TOP) : NEXT
 
 .slot_start                         ; alive[] at the start of a wave
 FOR i, 0, FORM_COUNT - 1
@@ -2145,7 +2152,7 @@ MACRO IMG_HI base, w, h
     EQUB HI(base), HI(base + ((w + 1) DIV 2) * h)
 ENDMACRO
 MACRO IMG_ENTRY w
-    EQUB 7 * (SPR_BYTES - (w + 1) DIV 2), 7 * (SPR_BYTES - (w + 2) DIV 2)
+    EQUB 9 * (SPR_BYTES - (w + 1) DIV 2), 9 * (SPR_BYTES - (w + 2) DIV 2)
 ENDMACRO
 MACRO DLT_LO base, w, h
     EQUB LO(base), LO(base + (w DIV 2 + 1) * h)
@@ -2154,7 +2161,7 @@ MACRO DLT_HI base, w, h
     EQUB HI(base), HI(base + (w DIV 2 + 1) * h)
 ENDMACRO
 MACRO DLT_ENTRY w
-    EQUB 7 * (SPR_BYTES - w DIV 2 - 1), 7 * (SPR_BYTES - (w + 1) DIV 2 - 1)
+    EQUB 9 * (SPR_BYTES - w DIV 2 - 1), 9 * (SPR_BYTES - (w + 1) DIV 2 - 1)
 ENDMACRO
 
 ; Logical colours: 1 red, 2 pulsing yellow, 3 yellow, 4 blue, 5 magenta, 6 cyan, 7 white
