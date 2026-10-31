@@ -61,9 +61,9 @@ mosaic(logo, 1, 6);
   mosaic(art[name].map((row) => row.map((v) => v !== 0)), 8, c);
 });
 
-// high score rows: names at HS_COL + 3, the score's 4 BCD digits at HS_COL + 16
+// high score rows: stage dots from HS_COL + 3, the score's 4 BCD digits at HS_COL + 16
 ["1", "2", "3", "4", "5"].forEach((rank, i) =>
-  put(HS_ROW + i, HS_COL, A.white, rank, A.cyan, "   ", A.blue, "........", A.yellow, "    0"));
+  put(HS_ROW + i, HS_COL, A.white, rank, A.green, "............", A.yellow, "    0"));
 
 put(20, 4, A.green, "Z LEFT    X RIGHT    RETURN FIRE");
 put(PROMPT_ROW, PROMPT_COL - 2, A.white, FLASH);
@@ -89,7 +89,7 @@ const out = [
   `HS_COL = ${HS_COL}`,
   `PROMPT_ROW = ${PROMPT_ROW}`,
   `PROMPT_COL = ${PROMPT_COL}`,
-  "ASSERT HS_NAME = 3 AND HS_DIGITS = 16 AND PROMPT_LEN = 13",
+  "ASSERT HS_DIGITS = 16 AND PROMPT_LEN = 13",
   ".title_screen",
   ...Array.from({ length: Math.ceil(packed.length / 16) }, (_, i) => "    EQUB " + packed.slice(i * 16, i * 16 + 16).map(hex).join(", ")),
   "",

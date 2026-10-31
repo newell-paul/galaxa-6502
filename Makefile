@@ -23,9 +23,9 @@ run: $(OUT)
 title.asm: tools/title.mjs $(SRC)
 	node tools/title.mjs
 
-# Headless smoothness test: 4000 frames (80 seconds of play, into wave 2) in jsbeeb
+# Headless smoothness test: 8000 frames (160 seconds of play, into wave 3: the boss makes waves longer) in jsbeeb
 test: $(OUT)
-	JSBEEB_DIR=$(JSBEEB_DIR) node tools/smoothness.mjs 4000
+	JSBEEB_DIR=$(JSBEEB_DIR) node tools/smoothness.mjs 8000
 
 clean:
 	rm -f $(OUT) galaxa.lst galaxa.sym title.asm
