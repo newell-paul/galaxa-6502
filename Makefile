@@ -1,6 +1,6 @@
 BEEBASM = beebasm
-SRC = swarm.asm
-OUT = swarm.ssd
+SRC = galaxa.asm
+OUT = galaxa.ssd
 
 JSBEEB_DIR = $(HOME)/.local/share/jsbeeb
 JSBEEB_URL = http://localhost:5173/\?disc1=$(OUT)\&autoboot
@@ -9,8 +9,8 @@ JSBEEB_URL = http://localhost:5173/\?disc1=$(OUT)\&autoboot
 
 all: $(OUT)
 
-$(OUT): $(SRC) !BOOT
-	$(BEEBASM) -i $(SRC) -do $(OUT) -opt 3 -v -d -labels swarm.sym > swarm.lst
+$(OUT): $(SRC) title.asm !BOOT
+	$(BEEBASM) -i $(SRC) -do $(OUT) -opt 3 -v -d -title GALAXA -labels galaxa.sym > galaxa.lst
 
 run: $(OUT)
 	@ln -sf $(CURDIR)/$(OUT) $(JSBEEB_DIR)/public/discs/$(OUT)
@@ -20,9 +20,12 @@ run: $(OUT)
 	fi
 	@open $(JSBEEB_URL)
 
-# Headless smoothness test: 3000 frames (1 minute of play) in jsbeeb
+title.asm: tools/title.mjs $(SRC)
+	node tools/title.mjs
+
+# Headless smoothness test: 4000 frames (80 seconds of play, into wave 2) in jsbeeb
 test: $(OUT)
-	JSBEEB_DIR=$(JSBEEB_DIR) node tools/smoothness.mjs 3000
+	JSBEEB_DIR=$(JSBEEB_DIR) node tools/smoothness.mjs 4000
 
 clean:
-	rm -f $(OUT) swarm.lst swarm.sym
+	rm -f $(OUT) galaxa.lst galaxa.sym title.asm

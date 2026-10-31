@@ -1,5 +1,5 @@
 ; ======================================================================================
-; Swarm - BBC Micro Model B fixed shooter skeleton (MODE 2, 6502, BeebAsm)
+; Galaxa - BBC Micro Model B fixed shooter skeleton (MODE 2, 6502, BeebAsm)
 ; Original design: three alien types in a swaying formation, one looping dive pattern.
 ;
 ; Controls: Z = left, X = right, RETURN = fire
@@ -29,17 +29,23 @@
 ;     and colours 9-15 repeat 1-7, so a sprite always shows over a star and neither
 ;     ever changes the other's pixels. Stars move straight after vsync, ahead of the beam.
 ;   - Divers peel off in a half loop, then swoop at the player with sideways momentum.
+;   - The ship fires one shot at a time. Shooting BONUS_KILLS swooping aliens drops a
+;     capsule; catching it gives two shots at a time until the ship is lost.
 ;   - Memory: the file loads at &1900 and copies itself down to &0E00 (the disc
-;     system's workspace, unused once loaded). Run-time state lives at &0400-&07FF.
+;     system's workspace, unused once loaded). Run-time state lives at &0400-&07FF, with
+;     the bonus capsule's code after it.
 ;   - One frame = wait for vsync (OSBYTE 19), then update everything once (50Hz).
 ;   - Fully deterministic: no random numbers, same inputs = same game.
 ; ======================================================================================
 
+OSRDCH = &FFE0
 OSWRCH = &FFEE
 OSWORD = &FFF1
 OSBYTE = &FFF4
+KEYV   = &0228
 
 SCREEN       = &3000
+MODE7_SCREEN = &7C00
 
 ; User VIA timer 2, used as a raster clock (1MHz, one tick per microsecond)
 USR_T2L      = &FE68
@@ -95,10 +101,44 @@ TWINKLE_RATE = 4              ; frames between twinkles: two stars blink out at 
 TWINKLE_STEP = 7
 STAR_BAND    = 48             ; stars above this row (or about to wrap to the top) move first
 
-FLAP_MASK    = 4              ; a row flaps on steps where frame AND FLAP_MASK = 0
+FLAP_MASK    = 4              ; a row sways on steps where frame AND FLAP_MASK = 0
+FLAP_SKIP    = 8              ; and flaps on those where frame AND FLAP_SKIP = 0 too
+
+SFX_FIRE     = 1              ; sfx bits, in sfx_data order
+SFX_DIVE     = 2
+SFX_DIE      = 4
+SFX_RUMBLE   = 8
+SFX_HIT      = 16             ; an alien shot: the wave tune at double speed (play_tune)
+SFX_POWER    = 32             ; the capsule caught: a jingle (play_tune), the last bit
+
+MACRO SFX bit
+    LDA #bit : ORA sfx : STA sfx
+ENDMACRO
 
 PLAYER_Y     = 232            ; top row of the player's ship
 PLAYER_MAX_X = 148            ; the right limit for the ship and the aliens
+PLAYER_START = 72             ; where each ship comes into play
+SPARE_Y      = 256 - 8        ; spare ships wait in the bottom left corner, 10 pixels apart
+DIE_TIME     = 144            ; frames a hit ship blinks before it goes
+FLASH_TIME   = 8              ; the first frames of that, the background flashes
+DIE_BLINK    = 8              ; it toggles every this many frames (a power of 2)
+ASSERT (DIE_TIME DIV DIE_BLINK) MOD 2 = 0       ; an odd number of toggles: it ends hidden
+ASSERT PLAYER_START MOD 2 = 0
+
+PS_PLAY      = 0              ; player_state values
+PS_DYING     = 1              ; hit: blinking out
+PS_SLIDE     = 2              ; the next ship sliding in from the spares: no hits, no control
+PS_OVER      = 3              ; the last ship has gone
+GAME_OVER_TIME = 100           ; frames GAME OVER shows before the title
+
+HS_ENTRIES   = 5
+HS_NAME      = 3              ; title.asm high score row: name, then score digits
+HS_DIGITS    = 16
+PROMPT_LEN   = 13
+PROMPT_ANY   = PROMPT_LEN - 1     ; last character of each prompt in txt_prompts
+PROMPT_INITIALS = 2 * PROMPT_LEN - 1
+TT_WHITE     = 135            ; teletext: white text
+TT_FLASH     = 136            ; teletext: flash
 ASSERT PLAYER_MAX_X + ALIEN_W <= 160    ; an alien there still fits on screen
 
 FORM_COLS    = 6
@@ -116,26 +156,31 @@ FX_MIN       = 4 + BREATH_MAX
 FX_MAX       = PLAYER_MAX_X - (FORM_COLS - 1) * COL_STEP - BREATH_MAX
 ASSERT FX_MIN < FX_START AND FX_START < FX_MAX    ; or the sway never turns
 
-LEVELS       = 4              ; waves 1, 2, 3 and 4 on: see the level tables
-RUSH_COUNT   = 4              ; this few aliens left: they dive almost non-stop
-RUSH_DELAY   = 10
+LEVELS       = 6              ; waves 1 to 5, then 6 on: see the level tables
+RUSH_COUNT   = 6              ; this few aliens left: they dive almost non-stop
+RUSH_DELAY   = 8
 DIVE_STRIDE  = 7              ; next diver = (last + 7) MOD 24; coprime with 24, visits every slot
-DIVER_SPEED  = 2              ; pixels per frame, down
+DIVER_SPEED  = 3              ; pixels per frame, down
 DIVER_BOTTOM = 240            ; wrap to the top once a diver passes this row
 DIVER_TOP    = 8              ; re-entry row, just under the HUD
 LOOP_LEN     = 32             ; frames in the peel-off half loop
 LOOP_R       = 14             ; its radius in pixels
-DIVE_VMAX    = 20             ; swoop speed limit sideways, in 1/16 pixels per frame
+DIVE_VMAX    = 24             ; swoop speed limit sideways, in 1/16 pixels per frame
 
-BULLETS      = 2
+BULLETS      = 2              ; the second only with the double shot
 BULLET_SPEED = 4              ; = bullet height: old and new positions just touch
 FIRE_DELAY   = 16             ; frames between shots
 BULLET_TOP   = 8              ; bullets vanish when they reach the HUD
 
+BONUS_KILLS  = 6              ; swooping aliens shot, with a single shot, for a capsule to drop
+BONUS_W      = 7
+BONUS_BOTTOM = 256 - ALIEN_H  ; gone once its top row passes this
+SPR_BONUS    = 11             ; an image id; delta id 11 is a cross delta, the same height
+
 ABULLETS     = 4              ; the aliens' bullets: up to this many on screen
-ABULLET_SPEED = 3             ; pixels per frame, down
+ABULLET_SPEED = 4             ; pixels per frame, down
 ABULLET_BOTTOM = 256 - 4      ; lowest top row on screen
-BURST_GAP    = 8              ; frames between shots in a burst
+BURST_GAP    = 6              ; frames between shots in a burst
 AFIRE_LOW    = PLAYER_Y - 24  ; no shots from closer to the player than this
 GLYPHS       = 14             ; "0"-"9" then "WAVE"
 GLYPH_W      = 10
@@ -156,7 +201,7 @@ DIVER_DIVE   = 1
 DIVER_RETURN = 2
 
 ; ---------------------------------------------------------------- zero page (&40-&71)
-; &00-&8F belongs to the current language; Swarm never returns to BASIC.
+; &00-&8F belongs to the current language; Galaxa never returns to BASIC.
 ptr0         = &40            ; 2: screen address of sprite byte column 0 (cell row 0)
                               ; ptr1.. follow, SPR_BYTES in all: ptr0 + 8 * n, byte column n
 draw_x       = &4C            ; plotter inputs: pixel x, pixel y, sprite id
@@ -186,7 +231,7 @@ new_x        = &63
 new_y        = &64
 form_row     = &65
 keys         = &66            ; KEY_* bits read at the start of the frame
-hud_dirty    = &67            ; non-zero: redraw the score and ships digits after the next vsync
+hud_dirty    = &67            ; non-zero: redraw the score digits after the next vsync
 abullet_idx  = &68            ; the aliens' bullet being updated
 afire_req    = &69            ; non-zero: the diver fires this frame, from afire_x / afire_y
 afire_x      = &6A
@@ -198,13 +243,32 @@ bullet_idx   = &70            ; which bullet the working copy belongs to
 fire_cool    = &71            ; frames until the next shot is allowed
 defer        = &72            ; non-zero: plots are queued for the next frame's start
 rnd          = &73            ; random byte, never 0: see random
+pl_last_id   = &74            ; the image plot last patched in: draw_id, then its address
+pl_last_lo   = &75
+pl_last_hi   = &76
+sfx          = &77            ; bit n: play sound n at the end of this frame
+sfx_x        = &78
+bg_colour    = &79            ; ULA palette byte for logical colour 0, set at each vsync
+wing_on      = &7A            ; non-zero: the diver has a wingman, its row neighbour
+wing_slot    = &7B
+wing_x       = &7C            ; at the diver's y, its slot's offset from the diver's slot
+wing_nx      = &7D
+lead_gone    = &7E            ; non-zero: the diver was shot; its path flies on for the wingman
+wing_req     = &7F            ; non-zero: the wingman fires this frame, from wing_fx / afire_y
+wing_fx      = &80
+keyv_os      = &81            ; and &82: the OS's KEYV, put back for the title
+power        = &83            ; non-zero: double shot, until the ship is lost
+bonus_on     = &84            ; the capsule: 0 none, 1 falling, 2 just dropped (it waits a frame)
+bonus_x      = &85
+bonus_y      = &86
+dive_kills   = &87            ; swooping aliens shot towards the next capsule
 ptr1         = ptr0 + 2
 ptr2         = ptr0 + 4
 ptr3         = ptr0 + 6
 ASSERT ptr0 + 2 * SPR_BYTES <= draw_x
 
 ; ---------------------------------------------------------------- run-time state
-; The language workspace: Swarm never returns to BASIC. Nothing here is saved to disc.
+; The language workspace: Galaxa never returns to BASIC. Nothing here is saved to disc.
 ORG &0400
 GUARD &0800
 .row_x
@@ -297,47 +361,77 @@ GUARD &0800
     SKIP 1
 .level                              ; min(wave, LEVELS) - 1
     SKIP 1
+.ships_shown                        ; spare ships drawn in the bottom left corner
+    SKIP 1
+.player_state                       ; PS_*
+    SKIP 1
+.player_t                           ; PS_DYING: frames left
+    SKIP 1
+.player_row                         ; the ship's top row: PLAYER_Y unless sliding in
+    SKIP 1
+.sound_blk                          ; OSWORD 7: channel, amplitude, pitch, duration
+    SKIP 8
+.state_end                          ; the bonus capsule's code follows: see hi_start
 
 LOAD_ADDR    = &1900          ; where *RUN puts the file (PAGE with DFS)
 
-ORG &0E00
-GUARD SCREEN
+ORG &0900                           ; OS buffers (envelopes 5-16, serial, cassette, soft keys,
+GUARD &0DF0                         ; characters 224-255) and the disc NMI code: free in play
+.lo_start
 
 ; ======================================================================================
 ; Start-up and game flow
 ; ======================================================================================
 
-.start
-    LDX #LO(vdu_setup) : LDY #HI(vdu_setup) : JSR print_vdu
-    JSR build_digits
-    LDA USR_ACR : AND #&DF : STA USR_ACR    ; timer 2 counts down once per microsecond
-    LDA #&20 : STA USR_IER                  ; and never interrupts
+; The MODE 7 title screen, with the initials of a new high score typed in first.
+.title
+    SEI
+    LDA keyv_os : STA KEYV : LDA keyv_os + 1 : STA KEYV + 1
+    CLI
+    LDA #122 : JSR OSBYTE           ; wait for every key up: one held from the game
+    INX : BNE title                 ; mustn't skip the title
+    LDA #&81 : STA SYS_IER          ; the OS reads the keyboard while the title shows
+    LDA #21 : LDX #0 : JSR OSBYTE   ; empty the keyboard buffer
+    LDX #LO(txt_mode7) : LDY #HI(txt_mode7) : JSR print_vdu
+    JSR draw_title
+    LDX hs_new : BMI ti_wait
+    JSR enter_initials
+.ti_wait
+    LDX #PROMPT_ANY : JSR show_prompt
+    JSR OSRDCH
+    LDA #&FF : STA hs_new
     LDA #&01 : STA SYS_IER          ; no keyboard interrupt: OSBYTE 129 scans keys itself,
                                     ; and the OS key handler would steal time mid-frame
+    SEI                             ; nor the 100Hz poll of a held key: ~1ms a tick
+    LDA #LO(keyv_none) : STA KEYV : LDA #HI(keyv_none) : STA KEYV + 1
+    CLI
+    LDX #LO(vdu_setup) : LDY #HI(vdu_setup) : JSR print_vdu
 
 .new_game
     LDA #12 : JSR OSWRCH            ; CLS (also resets hardware scroll)
     LDA #0 : STA score_lo : STA score_hi : STA wave
     LDA #3 : STA lives
-    LDA #72 : STA player_x
+    LDA #PLAYER_START : STA player_x
+    LDA #PLAYER_Y : STA player_row
     JSR draw_player
     JSR init_stars
     LDX #LO(txt_hud) : LDY #HI(txt_hud) : JSR print_vdu
     JSR print_hud
-    LDA #0 : STA keys : STA fire_cool : STA defer : STA queue_n
-    LDA rnd : BNE ng_seeded
-    INC rnd
-.ng_seeded
+    LDA #0 : STA keys : STA fire_cool : STA defer : STA queue_n : STA sfx
+    STA ships_shown : STA player_state
+    STA power : STA bonus_on : STA dive_kills
     STA bullets_on : STA bullets_on + 1   ; CLS has wiped them
     LDX #ABULLETS - 1
 .ng_abullets
     STA abullets_on,X
     DEX : BPL ng_abullets
+    LDA rnd : BNE ng_seeded
+    INC rnd
+.ng_seeded
     JSR new_wave
 
 .main_loop
-    LDA #19 : JSR OSBYTE            ; wait for vsync
-    LDA #&FF : STA USR_T2L : STA USR_T2H    ; restart the raster clock
+    JSR wait_vsync
     LDA diver_wrap : BEQ ml_stars
     JSR diver_reenter               ; first: it draws at DIVER_TOP, which the beam reaches soonest
     JSR update_stars_top            ; that took a while: the stars the beam reaches next
@@ -364,18 +458,21 @@ GUARD SCREEN
     ; Then follow the beam down the screen.
     JSR update_in_beam_order
     JSR check_player_hit
-    LDA lives : BEQ game_over
+    JSR play_sfx                    ; the beam is done with the sprites: time to spare
+    LDA player_state : CMP #PS_OVER : BEQ game_over
     LDA alive_count : BNE main_loop
     JSR new_wave                    ; every alien destroyed
     JMP main_loop
 
 .game_over
     LDX #LO(txt_game_over) : LDY #HI(txt_game_over) : JSR print_vdu
-.go_release                         ; wait for RETURN up, then down, so a held fire key doesn't skip
-    LDX #KEY_RETURN : JSR key_down : BEQ go_release
-.go_press
-    LDX #KEY_RETURN : JSR key_down : BNE go_press
-    JMP new_game
+    LDX #SND_OVER : JSR play_tune
+    LDA #GAME_OVER_TIME : STA intro_t
+.go_wait
+    LDA #19 : JSR OSBYTE
+    DEC intro_t : BNE go_wait
+    JSR insert_score
+    JMP title
 
 ; Reset the formation and timers, show "WAVE n", then drop the rows in from the top;
 ; the player can move throughout and the HUD stays on screen.
@@ -410,6 +507,7 @@ GUARD SCREEN
     JSR bullet_save
 .nw_next_bullet
     DEX : BPL nw_bullets
+    JSR bonus_clear
     LDX #ABULLETS - 1
 .nw_abullets
     LDA abullets_on,X : BEQ nw_next_abullet
@@ -423,6 +521,7 @@ GUARD SCREEN
     LDA #0 : STA burst_left : STA afire_armed
     JSR intro_frame
     JSR toggle_banner
+    LDX #SND_WAVE : JSR play_tune
     LDA #BANNER_TIME : STA intro_t
 .nw_banner
     JSR intro_frame
@@ -438,8 +537,7 @@ GUARD SCREEN
 
 ; A frame between waves: stars and the player only.
 .intro_frame
-    LDA #19 : JSR OSBYTE
-    LDA #&FF : STA USR_T2L : STA USR_T2H
+    JSR wait_vsync
     JSR twinkle_stars
     JSR update_stars
     JSR flush_plots
@@ -447,6 +545,13 @@ GUARD SCREEN
     JSR pulse_flagships
     JSR read_keys
     JMP update_player
+
+.wait_vsync
+    LDA #19 : JSR OSBYTE
+    LDA bg_colour : STA ULA_PALETTE ; before the beam reaches the screen: a hit ship's
+                                    ; flash goes on between waves too
+    LDA #&FF : STA USR_T2L : STA USR_T2H    ; restart the raster clock
+    RTS
 
 ; "WAVE n" in the middle of the screen, on or off.
 .toggle_banner
@@ -501,6 +606,235 @@ NEXT
     LDX form_row : INX : CPX #FORM_ROWS : BNE dr_row
     RTS
 
+
+; The new entry's row flashes while up to three characters are typed into it; DELETE
+; goes back one and RETURN ends it.
+.enter_initials
+    JSR hs_row
+    LDY #0 : LDA #TT_FLASH : STA (ptr1),Y
+    LDX #PROMPT_INITIALS : JSR show_prompt
+    LDY #HS_NAME
+.ei_key
+    JSR OSRDCH
+    CMP #13 : BEQ ei_done
+    CMP #127 : BNE ei_char
+    CPY #HS_NAME + 1 : BCC ei_key
+    DEY : LDA #' ' : STA (ptr1),Y
+    BNE ei_key
+.ei_char
+    CPY #HS_NAME + 3 : BCS ei_key   ; full: only DELETE or RETURN now
+    CMP #'a' : BCC ei_upper
+    AND #&DF
+.ei_upper
+    CMP #' ' : BCC ei_key
+    CMP #127 : BCS ei_key
+    STA (ptr1),Y
+    INY : BNE ei_key
+.ei_done
+    LDX hs_new
+    LDY #HS_NAME
+.ei_save
+    LDA (ptr1),Y : STA hs_data,X
+    INX : INY : CPY #HS_NAME + 3 : BNE ei_save
+    LDY #0 : LDA #TT_WHITE : STA (ptr1),Y
+    RTS
+
+.stamp_scores
+    LDX #0
+.ss_entry
+    JSR hs_row
+    LDY #HS_NAME
+.ss_name
+    LDA hs_data,X : STA (ptr1),Y
+    INX : INY : CPY #HS_NAME + 3 : BNE ss_name
+    LDY #HS_DIGITS
+    LDA hs_data,X : JSR ss_bcd : INX
+    LDA hs_data,X : JSR ss_bcd : INX
+    CPX #HS_ENTRIES * 5 : BNE ss_entry
+    RTS
+.ss_bcd                             ; two BCD digits from A to the screen at Y, Y + 1
+    PHA : LSR A : LSR A : LSR A : LSR A
+    ORA #'0' : STA (ptr1),Y : INY
+    PLA : AND #&0F
+    ORA #'0' : STA (ptr1),Y : INY
+    RTS
+
+.flash_ula                          ; logical colour 0, last frame first: back to black
+    EQUB &07, &06, &06, &06, &04, &04, &00, &00
+
+; ptr1 = the screen address of entry X's row at HS_COL (X = entry * 5).
+.hs_row
+    LDA #LO(MODE7_SCREEN + HS_ROW * 40 + HS_COL) : STA ptr1
+    LDA #HI(MODE7_SCREEN + HS_ROW * 40 + HS_COL) : STA ptr1 + 1
+    STX tmp
+.hr_next
+    LDA tmp : BEQ hr_done
+    SEC : SBC #5 : STA tmp
+    LDA ptr1 : CLC : ADC #40 : STA ptr1
+    BCC hr_next
+    INC ptr1 + 1 : BCS hr_next
+.hr_done
+    RTS
+
+; X = PROMPT_ANY or PROMPT_INITIALS.
+.show_prompt
+    LDY #PROMPT_LEN - 1
+.sp_copy
+    LDA txt_prompts,X : STA MODE7_SCREEN + PROMPT_ROW * 40 + PROMPT_COL,Y
+    DEX : DEY : BPL sp_copy
+    RTS
+
+; Make room in the table for the score, if it beats an entry. hs_new = its offset, or
+; &FF. A tie goes below the older score.
+.insert_score
+    LDA #&FF : STA hs_new
+    LDX #0
+.is_find
+    LDA hs_data + 3,X : CMP score_hi : BCC is_found : BNE is_next
+    LDA hs_data + 4,X : CMP score_lo : BCC is_found
+.is_next
+    TXA : CLC : ADC #5 : TAX
+    CPX #HS_ENTRIES * 5 : BNE is_find
+    RTS
+.is_found
+    STX hs_new
+    TXA : CLC : ADC #5 : STA tmp
+    LDY #HS_ENTRIES * 5 - 1
+.is_shift                           ; the entries below move down one, the last drops off
+    CPY tmp : BCC is_put
+    LDA hs_data - 5,Y : STA hs_data,Y
+    DEY : BPL is_shift
+.is_put
+    LDA #' ' : STA hs_data,X : STA hs_data + 1,X : STA hs_data + 2,X
+    LDA score_hi : STA hs_data + 3,X
+    LDA score_lo : STA hs_data + 4,X
+    RTS
+
+; Sound X / 4 from sfx_data as an OSWORD 7 block; returns X = the next sound's.
+.sound
+    LDY #0
+.snd_copy
+    LDA sfx_data,X : STA sound_blk,Y
+    LDA #0
+    CPY #2 : BNE snd_hi
+    LDA sfx_data,X : ASL A          ; amplitude -15..-1 (a fixed loudness): high byte &FF
+    LDA #&FF : ADC #0 : EOR #&FF
+.snd_hi
+    STA sound_blk + 1,Y
+    INX : INY : INY : CPY #8 : BNE snd_copy
+    STX sfx_x
+    LDX #LO(sound_blk) : LDY #HI(sound_blk) : LDA #7 : JSR OSWORD
+    LDX sfx_x
+    RTS
+
+.play_sfx
+    LDX #0
+.ps_bit
+    LSR sfx : BCS ps_play
+    INX : INX : INX : INX
+    BNE ps_next
+.ps_play
+    CPX #SND_HIT : BCC ps_one
+    BNE ps_power
+    JSR sound : JSR sound : JSR sound   ; the hit tune: the jingle can follow it
+.ps_one
+    JSR sound
+.ps_next
+    LDA sfx : BNE ps_bit
+    RTS
+
+.keyv_none
+    RTS
+.ps_power
+    LDX #SND_POWER
+.play_tune                          ; four notes, queued
+    JSR sound : JSR sound : JSR sound
+    JMP sound
+
+; channel (+ &10: cut off what it is playing), envelope (or -15..-1: a fixed loudness),
+; pitch (noise: its type), duration
+.sfx_data
+    EQUB &11, 1, 220, 3             ; SFX_FIRE
+    EQUB &12, 3, 230, 24            ; SFX_DIVE
+    EQUB &10, 2, 6, 20              ; SFX_DIE: a second of crash
+    EQUB &12, 3, 125, 20            ; SFX_RUMBLE: under it, falling (cuts off a dive)
+    EQUB &13, 4, 101, 1 : EQUB 3, 4, 117, 1 : EQUB 3, 4, 129, 1 : EQUB 3, 4, 149, 3
+    EQUB &13, 4, 129, 1 : EQUB 3, 4, 149, 1 : EQUB 3, 4, 165, 1 : EQUB 3, 4, 197, 4
+    EQUB &13, 4, 101, 2 : EQUB 3, 4, 117, 2 : EQUB 3, 4, 129, 2 : EQUB 3, 4, 149, 6
+    EQUB &13, 4, 129, 4 : EQUB 3, 4, 117, 4 : EQUB 3, 4, 105, 4 : EQUB 3, 4, 89, 10
+SND_HIT = 4 * 4
+SND_POWER = 8 * 4
+SND_WAVE = 12 * 4
+SND_OVER = 16 * 4
+
+; VDU strings
+
+.vdu_setup
+    EQUB vdu_setup_end - vdu_setup - 1
+    EQUB 22, 2                      ; MODE 2: logical colours 0-7 are the physical ones
+    EQUB 23, 1, 0, 0, 0, 0, 0, 0, 0, 0   ; cursor off
+    EQUB 19, PULSE_COLOUR, 3, 0, 0, 0    ; yellow until the pulse takes over
+    EQUB 19, STAR_COLOUR, 7, 0, 0, 0     ; a star alone: white
+    EQUB 19, 9, 1, 0, 0, 0          ; 9-15: a sprite colour over a star shows the sprite
+    EQUB 19, 10, 3, 0, 0, 0
+    EQUB 19, 11, 3, 0, 0, 0
+    EQUB 19, 12, 4, 0, 0, 0
+    EQUB 19, 13, 5, 0, 0, 0
+    EQUB 19, 14, 6, 0, 0, 0
+    EQUB 19, 15, 7, 0, 0, 0
+.vdu_setup_end
+
+.txt_hud                            ; digits are drawn by print_hud
+    EQUB 6, 17, 7, 31, 4, 0 : EQUS "0"
+.txt_game_over
+    EQUB 12, 31, 6, 15 : EQUS "GAME OVER"
+
+.lo_end
+
+ORG &0E00
+
+.main_start
+
+; ======================================================================================
+; Title screen and high scores
+; ======================================================================================
+
+; Unpack title_screen onto the clear MODE 7 screen (see tools/title.mjs), then fill in
+; the table.
+.draw_title
+    LDA #LO(title_screen) : STA ptr0 : LDA #HI(title_screen) : STA ptr0 + 1
+    LDA #LO(MODE7_SCREEN) : STA ptr1 : LDA #HI(MODE7_SCREEN) : STA ptr1 + 1
+.dt_next
+    JSR dt_byte : BEQ dt_run
+    CMP #32 : BCS dt_one
+    ADC ptr1 : STA ptr1             ; carry clear: skip A cells
+    BCC dt_next
+    INC ptr1 + 1 : BCS dt_next
+.dt_run
+    JSR dt_byte : BNE dt_count
+    JMP stamp_scores
+.dt_count
+    TAX
+    JSR dt_byte
+    BNE dt_put                      ; never 0
+.dt_one
+    LDX #1
+.dt_put                             ; X copies of A; Y = 0
+    STA (ptr1),Y
+    INC ptr1 : BNE dt_more
+    INC ptr1 + 1
+.dt_more
+    DEX : BNE dt_put
+    BEQ dt_next
+.dt_byte                            ; A = the next byte, flags set; Y = 0
+    LDY #0
+    LDA (ptr0),Y
+    INC ptr0 : BNE dt_got
+    INC ptr0 + 1
+.dt_got
+    CMP #0
+    RTS
+
 ; Run update_formation, each bullet's update and update_diver in the order the beam
 ; passes them. Objects low on screen go first, their plots queued for the start of the
 ; next frame: chasing the beam down to them would leave too little time before vsync,
@@ -517,6 +851,9 @@ NEXT
     LDA bullets_y,X : STA order_key + 1,X
 .ubo_bullet_next
     DEX : BPL ubo_bullet
+    LDA bonus_on : BEQ ubo_diver    ; the capsule takes the second bullet's turn
+    LDA bonus_y : STA order_key + 2
+.ubo_diver
     LDA #&FF : STA order_key + 3
     LDA diver_state : BEQ ubo_abullets
     LDA diver_y : STA order_key + 3
@@ -726,8 +1063,48 @@ NEXT
 ; Player
 ; ======================================================================================
 
-; One pixel per frame. Runs straight after vsync, so no beam guard is needed.
+; One pixel per frame. Runs straight after vsync, so no beam guard is needed: the beam
+; is far from the bottom rows. Spare ships are drawn here too, one a frame up to lives - 1.
+; A hit ship blinks out, then the last spare slides along and up to PLAYER_START.
 .update_player
+    LDA player_state : BEQ up_play
+    LDX #0 : STX keys               ; out of play: no moving or firing
+    CMP #PS_SLIDE : BEQ up_slide : BCS up_ret
+    DEC player_t : BEQ up_gone
+    LDA player_t : SEC : SBC #DIE_TIME - FLASH_TIME : BCC up_blink
+    TAX : LDA flash_ula,X : STA bg_colour
+.up_blink
+    LDA player_t : AND #DIE_BLINK - 1 : BNE up_ret
+    JMP draw_player
+.up_gone                            ; the last blink hid it
+    LDA #PS_OVER
+    LDX lives : BEQ up_state
+    DEC ships_shown
+    LDA ships_shown : JSR spare_x : STA player_x    ; the last spare becomes the ship
+    LDA #SPARE_Y : STA player_row
+    LDA #PS_SLIDE
+.up_state
+    STA player_state
+.up_ret
+    RTS
+.up_slide
+    JSR draw_player                 ; erase
+    LDA player_x : CMP #PLAYER_START : BEQ up_rise
+    INC player_x : INC player_x     ; spares sit at even x, as PLAYER_START is
+    JMP draw_player
+.up_rise
+    DEC player_row
+    JSR draw_player
+    LDA player_row : CMP #PLAYER_Y : BNE up_ret
+    LDA #PS_PLAY : STA player_state
+    RTS
+.up_play
+    LDX ships_shown : INX : CPX lives : BCS up_keys
+    STX ships_shown : DEX : TXA : JSR spare_x : STA draw_x
+    LDA #SPARE_Y : STA draw_y
+    LDA #SPR_PLAYER : STA draw_id
+    JSR plot_image
+.up_keys
     LDA keys : AND #KEY_LEFT : BEQ up_not_left
     LDA player_x : BEQ up_done
     DEC player_x
@@ -745,20 +1122,30 @@ NEXT
 .up_done
     RTS
 
+; A = spare ship: A = its x
+.spare_x
+    STA tmp : ASL A : ASL A : ADC tmp : ASL A
+    RTS
+
 .draw_player
     LDA #SPR_PLAYER : STA draw_id
     LDA player_x : STA draw_x
-    LDA #PLAYER_Y : STA draw_y
+    LDA player_row : STA draw_y
     JMP plot_image
 
+
 ; ======================================================================================
-; Player bullets (two on screen at a time)
+; Player bullets (one on screen at a time, two with the double shot)
 ; ======================================================================================
 
 ; Each bullet lives in bullets_on/x/y and is updated through the zero page working copy.
 .update_bullet_0
     LDX #0 : BEQ ub_slot
-.update_bullet_1
+.update_bullet_1                    ; a single shot leaves this slot to the capsule
+    LDA power : ORA bullets_on + 1 : BNE ub_1
+    LDA bonus_on : BEQ up_done
+    JMP update_bonus
+.ub_1
     LDX #1
 .ub_slot
     JSR bullet_load
@@ -787,6 +1174,7 @@ NEXT
     LDA player_x : CLC : ADC #3 : STA bullet_x  ; over the ship's nose
     LDA #PLAYER_Y - 4 : STA bullet_y
     LDA #1 : STA bullet_on
+    SFX SFX_FIRE
     LDA #PLAYER_Y - 4 : LDX #PLAYER_Y - 1 : JSR beam_guard
     JMP draw_bullet
 .ub_move
@@ -822,16 +1210,35 @@ NEXT
 ; when bullet_x - ax is -1..ALIEN_W - 1 and bullet_y - ay is -3..ALIEN_H - 1.
 .check_bullet_hits
     LDA diver_state : BEQ cbh_form
-    LDA bullet_x : SEC : SBC diver_x : CLC : ADC #1
-    CMP #ALIEN_W + 1 : BCS cbh_form
     LDA bullet_y : SEC : SBC diver_y : CLC : ADC #3
     CMP #ALIEN_H + 3 : BCS cbh_form
+    LDA lead_gone : BNE cbh_wing
+    LDA bullet_x : SEC : SBC diver_x : CLC : ADC #1
+    CMP #ALIEN_W + 1 : BCS cbh_wing
     JSR kill_bullet
     LDA diver_y : LDX diver_y : JSR beam_guard_alien
     JSR draw_diver                  ; erase
     LDX diver_slot : LDA #ALIVE_GONE : STA alive,X
+    LDA wing_on : STA lead_gone     ; a wingman flies on along the diver's path
+    BNE cbh_scored
+    BEQ cbh_over
+.cbh_wing
+    LDA wing_on : BEQ cbh_form
+    LDA bullet_x : SEC : SBC wing_x : CLC : ADC #1
+    CMP #ALIEN_W + 1 : BCS cbh_form
+    JSR kill_bullet
+    LDA diver_y : LDX diver_y : JSR beam_guard_alien
+    JSR draw_wing                   ; erase
+    LDX wing_slot : LDA #ALIVE_GONE : STA alive,X
+    STA wing_on
+    LDA lead_gone : BEQ cbh_scored
+    LDA #0
+.cbh_over                           ; A = 0: the dive is over
     STA diver_state : STA diver_wrap
+.cbh_scored
     DEC alive_count
+    JSR bonus_drop
+    SFX SFX_HIT
     LDA #&05 : JMP add_score        ; 50 points (BCD, HUD adds a trailing 0)
 
 .cbh_form
@@ -861,6 +1268,7 @@ NEXT
     JSR draw_slot                   ; erase the alien
     LDX loop_i : LDA #ALIVE_GONE : STA alive,X
     DEC alive_count
+    SFX SFX_HIT
     LDA #&01 : JMP add_score        ; 10 points
 .cbh_none
     RTS
@@ -881,7 +1289,8 @@ NEXT
 ; ======================================================================================
 
 .alien_fire
-    LDA #0 : STA afire_req          ; a shot no bullet was free for is dropped
+    LDA #0 : STA afire_req : STA wing_req   ; a shot no bullet was free for is dropped
+    LDA player_state : BNE af_end   ; no shots at a ship that is out of play
     LDA diver_state : CMP #DIVER_DIVE : BNE af_end
     LDA burst_left : BNE af_burst
     LDA afire_armed : BEQ af_done
@@ -900,8 +1309,14 @@ NEXT
     LDA #BURST_GAP : STA burst_gap
     LDA diver_y : CLC : ADC #ALIEN_H : STA afire_y
     CMP #AFIRE_LOW + 1 : BCS af_end ; too close: the rest of the burst is lost
+    LDA lead_gone : BNE af_wing
     LDA diver_x : CLC : ADC #ALIEN_MID : STA afire_x  ; under its middle
     INC afire_req
+.af_wing
+    LDA wing_on : BEQ af_shot
+    LDA wing_x : CLC : ADC #ALIEN_MID : STA wing_fx
+    INC wing_req
+.af_shot
     DEC burst_left
 .af_done
     RTS
@@ -928,14 +1343,21 @@ NEXT
 .ua_slot
     STX abullet_idx
     LDA abullets_on,X : BNE ua_move
-    LDA afire_req : BEQ ua_done     ; idle: take this frame's shot, if any
+    LDA afire_req : BEQ ua_wing     ; idle: take this frame's shot, if any
     LDA #0 : STA afire_req
+    LDA afire_x
+.ua_shoot
+    STA abullets_x,X
     LDA #1 : STA abullets_on,X
-    LDA afire_x : STA abullets_x,X
     LDA afire_y : STA abullets_y,X
     JSR abullet_pos
     LDA draw_y : CLC : ADC #3 : TAX : JSR beam_guard
     JMP abullet_draw
+.ua_wing
+    LDA wing_req : BEQ ua_done
+    LDA #0 : STA wing_req
+    LDA wing_fx
+    JMP ua_shoot
 .ua_move
     LDA abullets_y,X : CLC : ADC #ABULLET_SPEED + 3 : BCC ua_guard
     LDA #255                        ; leaving the bottom: only the old position is on screen
@@ -951,8 +1373,8 @@ NEXT
     ; the ship: bullet_x - player_x is 0..7 and the bullet's rows meet its 8
     SEC : SBC #PLAYER_Y - 3 : CMP #11 : BCS ua_done
     LDA abullets_x,X : SEC : SBC player_x : CMP #8 : BCS ua_done
-    DEC lives
-    INC hud_dirty
+    LDA player_state : BNE ua_done  ; a ship out of play: the bullet passes
+    JSR player_hit
 .ua_off
     JSR abullet_pos
     JSR abullet_draw                ; erase
@@ -972,7 +1394,7 @@ NEXT
 
 ; ======================================================================================
 ; Formation: four rows. Row (frame MOD 4) steps this frame, so the block ripples. Its
-; steps take turns: sway (the row slides a pixel and flaps) and breathe (the formation
+; steps take turns: sway (the row slides a pixel, flapping every other time) and breathe (the formation
 ; spreads out or draws in a pixel from its middle, the outer columns and rows most
 ; often, without flapping). A breath moves an alien across, up or down, or diagonally.
 ; ======================================================================================
@@ -992,16 +1414,19 @@ NEXT
 .uf_flip
     LDA row_dir,X : EOR #&FE : STA row_dir,X    ; 1 <-> &FF
 .uf_moved
-    LDA row_anim,X : EOR #1 : STA row_anim,X    ; flap: cross delta from frame to frame
     LDY #0
     LDA row_x,X : CMP old_x : BCS uf_right
+    LDA frame : AND #FLAP_SKIP : BNE uf_dir     ; no flap: the plain delta
     LDA draw_id : EOR #1 : STA draw_id          ; moving left: the delta starts at the new frame
-    JMP uf_dir
+    BNE uf_flap
 .uf_right
     DEY                             ; moving right: it sits at the old x
+    LDA frame : AND #FLAP_SKIP : BNE uf_dir
+.uf_flap
+    LDA row_anim,X : EOR #1 : STA row_anim,X    ; flap: cross delta from frame to frame
+    LDA draw_id : CLC : ADC #CROSS_OFS : STA draw_id
 .uf_dir
     STY tmp2                        ; added to each alien's new x
-    LDA draw_id : CLC : ADC #CROSS_OFS : STA draw_id
     JSR uf_guard
 .uf_col
     LDX loop_i
@@ -1099,6 +1524,7 @@ NEXT
     LDA diver_state : BEQ ud_idle
     JMP ud_active
 .ud_idle
+    LDA player_state : BNE ud_done  ; no new dives until the next ship is in place
     LDA alive_count : CMP #RUSH_COUNT + 1 : BCS ud_count
     LDA dive_timer : CMP #RUSH_DELAY + 1 : BCC ud_count
     LDA #RUSH_DELAY : STA dive_timer
@@ -1120,10 +1546,31 @@ NEXT
 .ud_launch                          ; the alien is already drawn where the diver starts
     LDA slot_row,X : CMP form_row : BNE ud_go
     LDA #1 : STA dive_timer         ; its row stepped this frame: launch next frame instead,
-    RTS                             ; or the step and the first dive move would show together
+    TXA : SEC : SBC #DIVE_STRIDE    ; or the step and the first dive move would show together
+    BCS ud_retry                    ; the same alien: the next one is likely in the next
+    ADC #FORM_COUNT                 ; frame's row
+.ud_retry
+    STA diver_pick
+    RTS
 .ud_go
+    SFX SFX_DIVE
     STX diver_slot
     LDA #ALIVE_DIVING : STA alive,X
+    LDA #0 : STA wing_on : STA lead_gone
+    INX                             ; the wingman: the next alien along the row, else the last
+    LDA slot_col,X : BEQ ud_wing_left
+    LDA alive,X : CMP #ALIVE_HOME : BEQ ud_wing
+.ud_wing_left
+    DEX : LDA slot_col,X : BEQ ud_solo
+    DEX
+    LDA alive,X : CMP #ALIVE_HOME : BNE ud_solo
+.ud_wing
+    STX wing_slot
+    LDA #ALIVE_DIVING : STA alive,X
+    JSR slot_pos : LDA slot_x : STA wing_x
+    INC wing_on
+.ud_solo
+    LDX diver_slot
     JSR slot_pos
     LDA slot_x : STA diver_x
     LDA slot_y : STA diver_y
@@ -1150,7 +1597,7 @@ NEXT
     JMP ud_return
 .ud_dive
     LDA diver_anim : STA new_anim
-    LDA frame : AND #FLAP_MASK OR 3 : BNE ud_path
+    LDA frame : AND #FLAP_MASK OR FLAP_SKIP OR 3 : BNE ud_path
     LDA new_anim : EOR #1 : STA new_anim    ; flaps at the formation's rate
 .ud_path
     LDX diver_t : CPX #LOOP_LEN : BCS ud_swoop
@@ -1178,7 +1625,7 @@ NEXT
     LDA diver_vx : CMP #256 - DIVE_VMAX : BEQ ud_glide
     DEC diver_vx
 .ud_glide                           ; x += vx / 16, keeping the fraction
-    LDA diver_xf : CLC : ADC diver_vx       ; -20..35
+    LDA diver_xf : CLC : ADC diver_vx       ; -24..39
     TAY : AND #15 : STA diver_xf
     TYA : CMP #&80 : ROR A : CMP #&80 : ROR A : CMP #&80 : ROR A : CMP #&80 : ROR A
     CLC : ADC new_x : STA new_x
@@ -1208,18 +1655,36 @@ NEXT
 .ud_rleft
     DEC new_x
 .ud_move
+    LDA wing_on : BEQ ud_draw       ; the wingman keeps its slot's offset, to dock with it
+    LDX wing_slot : JSR slot_pos : LDA slot_x : STA wing_nx
+    LDX diver_slot : JSR slot_pos   ; leaves the diver's slot in slot_x / slot_y
+    LDA wing_nx : SEC : SBC slot_x : CLC : ADC new_x : STA wing_nx
+    CMP #PLAYER_MAX_X + 1 : BCC ud_draw
+    LDY #PLAYER_MAX_X
+    CMP #&C0 : BCC ud_wfix
+    LDY #0
+.ud_wfix                            ; off the edge: slide the pair back on screen
+    STY tmp
+    LDA new_x : SEC : SBC wing_nx : CLC : ADC tmp : STA new_x
+    STY wing_nx
+.ud_draw
     LDA diver_y : LDX new_y : JSR beam_guard_alien
-    JSR draw_diver                  ; erase
+    JSR draw_pair                   ; erase
     LDA new_x : STA diver_x
     LDA new_y : STA diver_y
     LDA new_anim : STA diver_anim
-    JSR draw_diver
+    LDA wing_nx : STA wing_x
+    JSR draw_pair
     LDA diver_state : CMP #DIVER_RETURN : BNE ud_flying
     LDA diver_y : CMP slot_y : BNE ud_flying
     LDA diver_x : CMP slot_x : BNE ud_flying
-    LDA #DIVER_NONE : STA diver_state       ; docked: the image is already in the slot
-    LDX diver_slot
-    LDA #ALIVE_HOME : STA alive,X
+    LDA #DIVER_NONE : STA diver_state       ; docked: the images are already in the slots
+    LDA #ALIVE_HOME
+    LDX lead_gone : BNE ud_dock_wing
+    LDX diver_slot : STA alive,X
+.ud_dock_wing
+    LDX wing_on : BEQ ud_flying
+    LDX wing_slot : STA alive,X
 .ud_flying
     RTS
 
@@ -1232,33 +1697,58 @@ NEXT
     LDA #0 : STA diver_wrap
     LDA diver_y : PHA
     LDA #DIVER_TOP : STA diver_y
-    JSR draw_diver                  ; draw at the top before the beam gets there
+    JSR draw_pair                   ; draw at the top before the beam gets there
     PLA : STA diver_y
-    JSR draw_diver                  ; erase at the bottom
+    JSR draw_pair                   ; erase at the bottom
     LDA #DIVER_TOP : STA diver_y
     RTS
 .dr_done
     RTS
 
-.draw_diver
-    LDX diver_slot
+.draw_pair
+    JSR draw_diver
+.draw_wing
+    LDA wing_on : BEQ dd_done
+    LDX wing_slot : LDA wing_x
+    JMP dd_plot
+.draw_diver                         ; unless it was shot
+    LDA lead_gone : BNE dd_done
+    LDX diver_slot : LDA diver_x
+.dd_plot                            ; X = slot, A = x
+    STA draw_x
     LDY slot_row,X
     LDA row_spr,Y : ORA diver_anim : STA draw_id
-    LDA diver_x : STA draw_x
     LDA diver_y : STA draw_y
     JMP plot_image
+.dd_done
+    RTS
 
 ; A diving alien that reaches the ship costs a life and flies home from the top.
 .check_player_hit
+    LDA player_state : BNE cph_none
     LDA diver_state : CMP #DIVER_DIVE : BNE cph_none
     LDA diver_y : CMP #PLAYER_Y - ALIEN_H + 1 : BCC cph_none
-    LDA diver_x : SEC : SBC player_x : CLC : ADC #ALIEN_W - 1   ; 8-wide ship
-    CMP #ALIEN_W + 7 : BCS cph_none
+    LDA lead_gone : BNE cph_wing
+    LDA diver_x : JSR cph_near : BCC cph_crash
+.cph_wing
+    LDA wing_on : BEQ cph_none
+    LDA wing_x : JSR cph_near : BCS cph_none
+.cph_crash
     LDA #DIVER_RETURN : STA diver_state
     INC diver_wrap
+    ; fall through
+
+.player_hit
+    SFX SFX_DIE OR SFX_RUMBLE
+    LDA #0 : STA power
     DEC lives
-    INC hud_dirty
+    LDA #PS_DYING : STA player_state
+    LDA #DIE_TIME : STA player_t
 .cph_none
+    RTS
+.cph_near                           ; A = an alien's x: carry clear if it overlaps the ship
+    SEC : SBC player_x : CLC : ADC #ALIEN_W - 1   ; 8-wide ship
+    CMP #ALIEN_W + 7
     RTS
 
 ; ======================================================================================
@@ -1326,11 +1816,19 @@ NEXT
     CLC : ADC #LO(pl_col) : STA pl_row + 1
     LDA #HI(pl_col) : ADC #0 : STA pl_row + 2
     LDY draw_id : LDA spr_h,Y : STA draw_h
+    CPY pl_last_id : BNE pl_patch   ; the same image as last time (a row of aliens):
+    LDA PL_COL0 + 1 : CMP pl_last_lo : BNE pl_patch   ; its columns are patched in already
+    LDA PL_COL0 + 2 : CMP pl_last_hi : BEQ pl_patched
+.pl_patch
+    STY pl_last_id
+    LDA PL_COL0 + 1 : STA pl_last_lo
+    LDA PL_COL0 + 2 : STA pl_last_hi
     CLC
 FOR c, 1, SPR_BYTES - 1
     LDA PL_COL0 - 7 * (c - 1) + 1 : ADC draw_h : STA PL_COL0 - 7 * c + 1
     LDA PL_COL0 - 7 * (c - 1) + 2 : ADC #0 : STA PL_COL0 - 7 * c + 2
 NEXT
+.pl_patched
     JSR screen_ptrs
     LDX #0
 .pl_row
@@ -1423,9 +1921,7 @@ NEXT
     LDA score_lo : LSR A : LSR A : LSR A : LSR A
     LDX #2 : JSR print_digit
     LDA score_lo : AND #&0F
-    LDX #3 : JSR print_digit
-    LDA lives
-    LDX #19
+    LDX #3
     ; fall through
 
 ; Copy digit A (0-9) into text column X of the top text row. Writing screen memory
@@ -1443,30 +1939,6 @@ NEXT
     LDA digits + GLYPHS * 24,X : STA (ptr3),Y
     INX : INY : CPY #8 : BNE pd_copy
     RTS
-
-; digits: GLYPHS glyphs from the OS font in white, as 4 byte columns of GLYPHS * 8 bytes
-; (glyph * 8 + row). A font bit pair (left, right) becomes pair * &15 on screen.
-.build_digits
-    LDA #0 : STA loop_i
-.bd_char
-    LDX loop_i : LDA glyph_chars,X : STA font_buf
-    LDA #10 : LDX #LO(font_buf) : LDY #HI(font_buf) : JSR OSWORD
-    LDA loop_i : ASL A : ASL A : ASL A : TAX    ; glyph * 8
-    LDY #0
-.bd_row
-    LDA font_buf + 1,Y : STA tmp
-FOR c, 0, 3
-    LDA #0 : ASL tmp : ROL A : ASL tmp : ROL A
-    STA tmp2 : ASL A : ASL A : ORA tmp2 : STA tmp2 : ASL A : ASL A : ORA tmp2
-    STA digits + GLYPHS * 8 * c,X
-NEXT
-    INX : INY : CPY #8 : BNE bd_row
-    INC loop_i : LDA loop_i : CMP #GLYPHS : BEQ bd_done
-    JMP bd_char
-.bd_done
-    RTS
-.glyph_chars
-    EQUS "0123456789WAVE"
 
 ; EOR glyph A into text column X of the banner row. It uses colours 0-7 and the stars
 ; colour 8, so a star under it survives, and EORing it again removes it.
@@ -1499,25 +1971,21 @@ NEXT
 ; Data
 ; ======================================================================================
 
-.vdu_setup
-    EQUB vdu_setup_end - vdu_setup - 1
-    EQUB 22, 2                      ; MODE 2: logical colours 0-7 are the physical ones
-    EQUB 23, 1, 0, 0, 0, 0, 0, 0, 0, 0   ; cursor off
-    EQUB 19, PULSE_COLOUR, 3, 0, 0, 0    ; yellow until the pulse takes over
-    EQUB 19, STAR_COLOUR, 7, 0, 0, 0     ; a star alone: white
-    EQUB 19, 9, 1, 0, 0, 0          ; 9-15: a sprite colour over a star shows the sprite
-    EQUB 19, 10, 3, 0, 0, 0
-    EQUB 19, 11, 3, 0, 0, 0
-    EQUB 19, 12, 4, 0, 0, 0
-    EQUB 19, 13, 5, 0, 0, 0
-    EQUB 19, 14, 6, 0, 0, 0
-    EQUB 19, 15, 7, 0, 0, 0
-.vdu_setup_end
+INCLUDE "title.asm"
 
-.txt_hud                            ; digits are drawn by print_hud
-    EQUB 14, 17, 7, 31, 4, 0 : EQUS "0" : EQUB 31, 13, 0 : EQUS "SHIPS"
-.txt_game_over
-    EQUB 12, 31, 5, 15 : EQUS "GAME OVER"
+.hs_data                            ; 5 x (3 characters, BCD score high, low)
+    EQUS "LDA" : EQUB &05, &00
+    EQUS "STA" : EQUB &04, &00
+    EQUS "JMP" : EQUB &03, &00
+    EQUS "RTS" : EQUB &02, &00
+    EQUS "NOP" : EQUB &01, &00
+.hs_new                             ; offset of the entry to type initials into, or &FF
+    EQUB &FF
+.txt_prompts
+    EQUS "PRESS ANY KEY"
+    EQUS "TYPE INITIALS"
+.txt_mode7
+    EQUB 12, 22, 7, 23, 1, 0, 0, 0, 0, 0, 0, 0, 0      ; MODE 7, cursor off
 
 ; Screen address of each character row, and the offset of each byte column in it
 .crow_lo
@@ -1553,15 +2021,15 @@ NEXT
 .slot_col                           ; one extra entry so the last row's walk ends on 0
 FOR i, 0, FORM_COUNT : EQUB i MOD FORM_COLS : NEXT
 
-; Per level: wave 1, 2, 3, then 4 on
+; Per level: wave 1 to 5, then 6 on
 .dive_delays                        ; frames between dives
-    EQUB 90, 60, 40, 25
+    EQUB 80, 55, 40, 30, 22, 16
 .burst_mins                         ; a burst is this many shots or one more
-    EQUB 2, 3, 3, 3
+    EQUB 2, 3, 3, 3, 3, 3
 .afire_tops                         ; a diver opens fire once it is below this row
-    EQUB 96, 80, 64, 64
+    EQUB 96, 80, 64, 56, 48, 40
 .afire_ranges                       ; and its middle is within this many pixels of the player's
-    EQUB 24, 32, 40, 40
+    EQUB 24, 32, 40, 44, 48, 52
 
 .row_y0
 FOR r, 0, FORM_ROWS - 1 : EQUB FORM_Y + r * ROW_STEP : NEXT
@@ -1694,8 +2162,9 @@ ART_PLAYER = "00077000" + "00077000" + "00777700" + "06755760" + "66777766" + "6
 ART_BULLET = "77" + "77" + "77" + "77"
 ART_BULLET_STEP = "77" + "77" + "77" + "77" + "77" + "77" + "77" + "77"
 ART_ABULLET = "1" + "3" + "3" + "7"
-ART_FLAGSHIP   = "0000110000" + "0002222000" + "2027227202" + "1222222221" + "1122222211" + "1011221101" + "1001111001" + "0001001000"
-ART_FLAGSHIP_B = "0000110000" + "2002222002" + "1027227201" + "1122222211" + "0122222210" + "0011221100" + "0001111000" + "0010000100"
+ART_BONUS   = "0222220" + "2244422" + "2222422" + "2244422" + "2242222" + "2244422" + "0222220" + "0000000"
+ART_FLAGSHIP   = "4000220004" + "4002222004" + "4122112214" + "4121111214" + "4441111444" + "0440110440" + "0000110000" + "0000110000"
+ART_FLAGSHIP_B = "0000220000" + "4002222004" + "4122112214" + "4121111214" + "4441111444" + "4440110444" + "0000110000" + "0000110000"
 ART_ESCORT     = "0000110000" + "0001111000" + "5013113105" + "5111111115" + "5011111105" + "5001111005" + "5000110005" + "5500000055"
 ART_ESCORT_B   = "0000110000" + "5001111005" + "5113113115" + "5111111115" + "0511111150" + "0011111100" + "0001111000" + "0000110000"
 ART_DRONE      = "0400000040" + "0040000400" + "0055555500" + "0574554750" + "6555555556" + "6056556506" + "6060000606" + "0606006060"
@@ -1707,6 +2176,7 @@ ART_DRONE_B    = "0040000400" + "0040000400" + "6055555506" + "6574554756" + "05
 .gfx_bullet_step  : IMAGES ART_BULLET_STEP, 2, 8
 .gfx_abullet      : IMAGES ART_ABULLET, 1, 4
 .gfx_abullet_step : VDELTAS ART_ABULLET, 1, 4, ABULLET_SPEED
+.gfx_bonus_0      : IMAGE ART_BONUS, BONUS_W, ALIEN_H, 0  ; shift 1 is in the hi block
 .gfx_flagship     : IMAGES ART_FLAGSHIP, ALIEN_W, ALIEN_H
 .gfx_flagship_d   : DELTAS ART_FLAGSHIP, ART_FLAGSHIP, ALIEN_W, ALIEN_H
 .gfx_flagship_b   : IMAGES ART_FLAGSHIP_B, ALIEN_W, ALIEN_H
@@ -1745,7 +2215,7 @@ ART_DRONE_B    = "0040000400" + "0040000400" + "6055555506" + "6574554756" + "05
 .gfx_drone_b_up   : DDELTAS ART_DRONE_B, ALIEN_W, ALIEN_H, 1
 
 ; ids: 0 player, 1 bullet, 2-3 flagship, 4-5 escort, 6-7 drone, 8 bullet step,
-;      9 enemy bullet, 10 its step,
+;      9 enemy bullet, 10 its step, 11 the bonus capsule (an image only),
 ;      11-16 cross deltas (id - CROSS_OFS = the frame it starts from),
 ;      17-22 vertical deltas (id - VERT_OFS = the frame), image-shaped and ALIEN_H + 1 rows,
 ;      23-28 and 29-34 diagonal deltas (id - DOWN_OFS / UP_OFS = the frame), ALIEN_H + 1 rows
@@ -1762,6 +2232,7 @@ ART_DRONE_B    = "0040000400" + "0040000400" + "6055555506" + "6574554756" + "05
     IMG_LO gfx_drone, ALIEN_W, ALIEN_H : IMG_LO gfx_drone_b, ALIEN_W, ALIEN_H
     IMG_LO gfx_bullet_step, 2, 8
     IMG_LO gfx_abullet, 1, 4 : IMG_LO gfx_abullet_step, 1, 4 + ABULLET_SPEED
+    EQUB LO(gfx_bonus_0), LO(gfx_bonus_1)
 .img_hi
     IMG_HI gfx_player, 8, 8 : IMG_HI gfx_bullet, 2, 4
     IMG_HI gfx_flagship, ALIEN_W, ALIEN_H : IMG_HI gfx_flagship_b, ALIEN_W, ALIEN_H
@@ -1769,11 +2240,13 @@ ART_DRONE_B    = "0040000400" + "0040000400" + "6055555506" + "6574554756" + "05
     IMG_HI gfx_drone, ALIEN_W, ALIEN_H : IMG_HI gfx_drone_b, ALIEN_W, ALIEN_H
     IMG_HI gfx_bullet_step, 2, 8
     IMG_HI gfx_abullet, 1, 4 : IMG_HI gfx_abullet_step, 1, 4 + ABULLET_SPEED
+    EQUB HI(gfx_bonus_0), HI(gfx_bonus_1)
 .img_entry
     IMG_ENTRY 8 : IMG_ENTRY 2
     IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W
     IMG_ENTRY 2
     IMG_ENTRY 1 : IMG_ENTRY 1
+    IMG_ENTRY BONUS_W
 .dlt_lo                             ; the bullets only move vertically: no deltas
     DLT_LO gfx_player_d, 8, 8 : EQUB 0, 0
     DLT_LO gfx_flagship_d, ALIEN_W, ALIEN_H : DLT_LO gfx_flagship_b_d, ALIEN_W, ALIEN_H
@@ -1819,23 +2292,157 @@ ART_DRONE_B    = "0040000400" + "0040000400" + "6055555506" + "6574554756" + "05
     FOR i, 21, 32 : DLT_ENTRY ALIEN_W : NEXT
 
 .end
+ASSERT end <= SCREEN              ; the loader below only runs at load time
 
-; Loader: runs where *RUN put it, just after the program's bytes, and copies the
-; program down to start. Only relative branches inside, so it runs anywhere.
-RELOC = LOAD_ADDR - start
-.mover
-    LDA #LO(LOAD_ADDR) : STA ptr0 : LDA #HI(LOAD_ADDR) : STA ptr0 + 1
-    LDA #LO(start) : STA ptr1 : LDA #HI(start) : STA ptr1 + 1
-    LDX #HI(end - start + 255)
+; ======================================================================================
+; Bonus capsule: shoot BONUS_KILLS swooping aliens with a single shot and one drops
+; from the last, falling a pixel a frame. The ship catches it for the double shot.
+; Its code fills the end of the run-time state page; the loader puts it there.
+; ======================================================================================
+
+ORG state_end
+GUARD &0800
+.hi_start
+
+; A swooping alien was shot at diver_y, by the bullet at bullet_x; the beam is past its
+; rows, which the capsule's are.
+.bonus_drop
+    LDA power : ORA bonus_on : BNE bn_ret
+    INC dive_kills
+    LDA dive_kills : CMP #BONUS_KILLS : BCC bn_ret
+    LDA alive_count : BEQ bn_ret    ; the wave's last alien: the next wave's first, then
+    LDA bullets_on + 1 : BNE bn_ret ; a double shot's last bullet still flying: next time
+    STA dive_kills
+    LDA #2 : STA bonus_on
+    LDA bullet_x : SEC : SBC #(BONUS_W - 1) DIV 2 : STA bonus_x
+    LDA diver_y : STA bonus_y
+    JMP bonus_draw
+.bn_ret
+    RTS
+
+; In beam order, in the second bullet's turn.
+.update_bonus
+    LDA bonus_on : CMP #2 : BNE ubn_move
+    DEC bonus_on
+    RTS
+.ubn_move
+    LDA bonus_y : CLC : ADC #ALIEN_H : TAX
+    LDA bonus_y : JSR beam_guard    ; old and new positions together
+    JSR bonus_draw                  ; erase
+    INC bonus_y
+    LDA bonus_y : CMP #BONUS_BOTTOM : BCS ubn_off
+    LDX player_state : BNE bonus_draw
+    CMP #PLAYER_Y - 6 : BCC bonus_draw          ; its 7 rows meet the ship's 8
+    CMP #PLAYER_Y + 8 : BCS bonus_draw
+    LDA bonus_x : SEC : SBC player_x : CLC : ADC #BONUS_W - 1
+    CMP #BONUS_W + 7 : BCS bonus_draw           ; and its 7 columns the ship's 8
+    INC power
+    SFX SFX_POWER
+.ubn_off
+    LDA #0 : STA bonus_on
+    RTS
+
+.bonus_draw
+    LDA #SPR_BONUS : STA draw_id
+    LDA bonus_x : STA draw_x
+    LDA bonus_y : STA draw_y
+    JMP plot_image
+
+; Between waves: the capsule is lost.
+.bonus_clear
+    LDA bonus_on : BEQ bn_ret
+    LDA bonus_y : TAX : JSR beam_guard_alien
+    JSR bonus_draw
+    LDA #0 : STA bonus_on
+    RTS
+
+.gfx_bonus_1 : IMAGE ART_BONUS, BONUS_W, ALIEN_H, 1   ; shift 0 is in the main block
+.hi_end
+
+; Loader: assembled where *RUN puts it, just after the main block's bytes, with the
+; &0900 block's bytes after it. It copies both blocks into place, then runs the
+; one-time set-up from here, so none of it takes room in the game.
+LOADER = LOAD_ADDR + end - main_start
+ORG LOADER
+.loader
+    LDA #119 : JSR OSBYTE           ; close !BOOT's EXEC file while the DFS workspace is intact
+    LDA #LO(loader_end) : STA ptr0 : LDA #HI(loader_end) : STA ptr0 + 1
+    LDA #LO(lo_start) : STA ptr1 : LDA #HI(lo_start) : STA ptr1 + 1
+    LDX #HI(lo_end - lo_start)
     LDY #0
+.mv_lo
+    LDA (ptr0),Y : STA (ptr1),Y
+    INY : BNE mv_lo
+    INC ptr0 + 1 : INC ptr1 + 1
+    DEX : BNE mv_lo
+.mv_lo_part                         ; exactly: the ROM workspace table follows at &0DF0
+    LDA (ptr0),Y : STA (ptr1),Y
+    INY : CPY #LO(lo_end - lo_start) : BNE mv_lo_part
+    LDY #0
+    LDX #hi_end - hi_start
+.mv_hi
+    LDA loader_end + lo_end - lo_start - 1,X : STA hi_start - 1,X
+    DEX : BNE mv_hi
+    LDA #LO(LOAD_ADDR) : STA ptr0 : LDA #HI(LOAD_ADDR) : STA ptr0 + 1
+    LDA #LO(main_start) : STA ptr1 : LDA #HI(main_start) : STA ptr1 + 1
+    LDX #HI(end - main_start + 255)
 .mv_copy                            ; ascending: the destination is always below the source
     LDA (ptr0),Y : STA (ptr1),Y
     INY : BNE mv_copy
     INC ptr0 + 1 : INC ptr1 + 1
     DEX : BNE mv_copy
-    JMP start
-.mover_end
-ASSERT start + HI(end - start + 255) * 256 <= mover + RELOC   ; the copy never reaches the mover
 
-SAVE "SWARM", start, mover_end, mover + RELOC, LOAD_ADDR
+; digits: GLYPHS glyphs from the OS font in white, as 4 byte columns of GLYPHS * 8 bytes
+; (glyph * 8 + row). A font bit pair (left, right) becomes pair * &15 on screen.
+.build_digits
+    LDA #0 : STA loop_i
+.bd_char
+    LDX loop_i : LDA glyph_chars,X : STA font_buf
+    LDA #10 : LDX #LO(font_buf) : LDY #HI(font_buf) : JSR OSWORD
+    LDA loop_i : ASL A : ASL A : ASL A : TAX    ; glyph * 8
+    LDY #0
+.bd_row
+    LDA font_buf + 1,Y : STA tmp
+FOR c, 0, 3
+    LDA #0 : ASL tmp : ROL A : ASL tmp : ROL A
+    STA tmp2 : ASL A : ASL A : ORA tmp2 : STA tmp2 : ASL A : ASL A : ORA tmp2
+    STA digits + GLYPHS * 8 * c,X
+NEXT
+    INX : INY : CPY #8 : BNE bd_row
+    INC loop_i : LDA loop_i : CMP #GLYPHS : BEQ bd_done
+    JMP bd_char
+.bd_done
+    LDA KEYV : STA keyv_os : LDA KEYV + 1 : STA keyv_os + 1
+    LDA #&FF : STA pl_last_id       ; no image patched into plot yet
+    LDA #&07 : STA bg_colour        ; black (the ULA stores colours inverted)
+FOR e, 0, 3                         ; envelopes 1-4: the OS keeps them at &08C0
+    LDX #LO(envelopes + 14 * e) : LDY #HI(envelopes + 14 * e) : LDA #8 : JSR OSWORD
+NEXT
+    LDA #229 : LDX #1 : LDY #0 : JSR OSBYTE    ; ESCAPE is an ordinary key
+    LDA USR_ACR : AND #&DF : STA USR_ACR    ; timer 2 counts down once per microsecond
+    LDA #&20 : STA USR_IER                  ; and never interrupts
+    JMP title
+.glyph_chars
+    EQUS "0123456789WAVE"
+; number, step (cs; + 128: the pitch doesn't repeat), pitch change per step and steps
+; in 3 sections, then amplitude: attack, decay, sustain and release rates, attack and
+; decay levels
+.envelopes
+    EQUB 1, 129, -8, 0, 0, 8, 0, 0, 126, -12, 0, -12, 126, 0         ; fire: a falling zap
+    EQUB 2, 1, 0, 0, 0, 0, 0, 0, 126, -3, -1, -6, 126, 80            ; explosions
+    EQUB 3, 130, -2, 0, 0, 60, 0, 0, 60, -1, 0, -4, 60, 59           ; dive: a falling whistle
+    EQUB 4, 1, 0, 0, 0, 0, 0, 0, 126, -8, -2, -10, 110, 60           ; tune notes
+.loader_end
+ASSERT HI(lo_end - lo_start) > 0 AND LO(lo_end - lo_start) > 0
+ASSERT main_start + HI(end - main_start + 255) * 256 <= loader  ; the copy never reaches the loader
+HI_SIZE = hi_end - hi_start
+ASSERT HI_SIZE > 0 AND HI_SIZE < 256
+ASSERT loader_end + lo_end - lo_start + HI_SIZE <= &7C00        ; the file loads below MODE 7's screen
+ASSERT end + loader_end - loader + lo_end - lo_start + HI_SIZE <= loader  ; the file image below doesn't overlap it
+ASSERT SPR_BONUS * 2 + 1 < img_hi - img_lo AND SPR_BONUS = CROSS_OFS + 2   ; spr_h: ALIEN_H, as the capsule
+
+COPYBLOCK loader, loader_end, end
+COPYBLOCK lo_start, lo_end, end + loader_end - loader
+COPYBLOCK hi_start, hi_end, end + loader_end - loader + lo_end - lo_start
+SAVE "GALAXA", main_start, end + loader_end - loader + lo_end - lo_start + HI_SIZE, loader, LOAD_ADDR
 PUTTEXT "!BOOT", "!BOOT", &FFFF
