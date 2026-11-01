@@ -7,7 +7,11 @@ MODE 2, eight colours, 50 frames a second.
 
 **https://newell-paul.github.io/galaxa-6502/**
 
-Click the screen, then press any key to start.
+Press any key to start. On a phone or tablet, tap **FIRE** to start and hold the
+on-screen arrows to move; turn it sideways for the biggest screen.
+
+**Full screen:** the page's Full screen button (<kbd>Esc</kbd> to leave). On an iPhone,
+use Share → Add to Home Screen instead: it opens from there with no browser bars.
 
 | Key | Action |
 |-----|--------|
@@ -43,6 +47,7 @@ make              # build galaxa.ssd
 make run          # build, then open it in a local jsbeeb
 make run-debug    # debug build: P cycles the power level
 make serve        # the browser page, at http://localhost:8086/
+make web          # rebuild web/, the page's emulator, from a jsbeeb checkout
 ```
 
 Or load `galaxa.ssd` in any BBC Micro emulator and press Shift+Break.
@@ -61,6 +66,9 @@ the capsule rules. It expects a jsbeeb checkout at `~/.local/share/jsbeeb` (set
 | `galaxa.asm` | The game |
 | `galaxa.ssd` | The built disc, which the browser page boots |
 | `index.html` | The browser page (GitHub Pages) |
+| `manifest.webmanifest` | Lets phones add the page to the home screen |
+| `web/` | The page's emulator: jsbeeb bundled, GPL-3.0 (see `web/README.txt`) |
+| `tools/web/` | Builds `web/`: the emulator page script and its bundler |
 | `tools/title.mjs` | Builds the MODE 7 title screen |
 | `tools/smoothness.mjs` | Frame-by-frame smoothness test |
 | `tools/capsule.mjs` | Capsule and power-up test |
@@ -70,3 +78,6 @@ the capsule rules. It expects a jsbeeb checkout at `~/.local/share/jsbeeb` (set
 ## Licence
 
 © 2026 Paul Newell. Released under the MIT licence; see [`LICENSE`](./LICENSE).
+
+The files in `web/` bundle jsbeeb and are GPL-3.0-or-later; see `web/LICENSE-jsbeeb.txt`.
+The BBC ROMs are not in this repository: the page loads them from bbc.xania.org.
