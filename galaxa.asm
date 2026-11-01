@@ -4,6 +4,8 @@
 ; (User VIA T2 restarts at vsync), so nothing tears. Sprites use colour bits 0-2, stars bit 3,
 ; so neither disturbs the other. Loads at &1900, copies down to &0E00 (DFS workspace, free once loaded).
 
+VERSION = "0.9.0"                   ; tools/title.mjs puts it on the title screen
+
 OSRDCH = &FFE0
 OSWRCH = &FFEE
 OSWORD = &FFF1
@@ -2361,6 +2363,7 @@ ART_DRONE_B    = "0040000400" + "0040000400" + "6055555506" + "6574554756" + "05
 .gfx_abullet      : IMAGES ART_ABULLET, 1, 4
 .gfx_abullet_step : VDELTAS ART_ABULLET, 1, 4, ABULLET_SPEED
 .gfx_bonus_0      : IMAGE ART_BONUS, BONUS_W, ALIEN_H, 0  ; bonus_x is even: no shift 1
+.gfx_expl         : IMAGE ART_EXPL, EXPL_W, ALIEN_H, 0
 .gfx_flagship     : IMAGES ART_FLAGSHIP, ALIEN_W, ALIEN_H
 .gfx_flagship_d   : DELTAS ART_FLAGSHIP, ART_FLAGSHIP, ALIEN_W, ALIEN_H
 .gfx_flagship_b   : IMAGES ART_FLAGSHIP_B, ALIEN_W, ALIEN_H
@@ -2575,8 +2578,6 @@ GUARD &0800
     LSR defer
 .ux_ret
     RTS
-
-.gfx_expl : IMAGE ART_EXPL, EXPL_W, ALIEN_H, 0
 
 INCLUDE "title.asm"
 .hi_end

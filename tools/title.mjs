@@ -7,6 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+const VERSION = fs.readFileSync(path.join(ROOT, "galaxa.asm"), "utf8").match(/^VERSION\s*=\s*"([^"]+)"/m)[1];
 
 const A = { red: 129, green: 130, yellow: 131, blue: 132, magenta: 133, cyan: 134, white: 135 };
 const G = { red: 145, green: 146, yellow: 147, blue: 148, magenta: 149, cyan: 150, white: 151 };
@@ -76,6 +77,7 @@ put(HS_ROW + 2, 33, G.white, SEP, 32 | SIX[1][0]);
 put(19, 4, A.green, "Z LEFT    X RIGHT    RETURN FIRE");
 put(PROMPT_ROW, PROMPT_COL - 1, FLASH, "PRESS ANY KEY");
 put(24, 9, A.blue, "(C) Paul Newell 2026");
+put(24, 39 - VERSION.length, "v" + VERSION);
 
 // pack it: skips for spaces, runs of 4 or more, the rest as they are
 const flat = scr.flat();
