@@ -225,8 +225,6 @@ fire_cool    = &71
 defer        = &72
 rnd          = &73            ; never 0
 pl_last_id   = &74            ; self-modified plot: last id patched in, then its address
-pl_last_lo   = &75
-pl_last_hi   = &76
 sfx          = &77
 sfx_x        = &78
 bg_colour    = &79
@@ -372,8 +370,6 @@ GUARD &0800
     SKIP FORM_ROWS
 .alive
     SKIP FORM_SLOTS
-.font_buf
-    SKIP 9
 .font1
     SKIP GLYPHS * 8
 .star_x
@@ -393,7 +389,9 @@ GUARD &0800
 .order_key
     SKIP ORDER_N
 .queue_x
+.font_buf                           ; OSWORD 10 scratch during the loader only
     SKIP QUEUE_MAX
+ASSERT QUEUE_MAX >= 9
 .queue_y
     SKIP QUEUE_MAX
 .queue_id
@@ -538,8 +536,7 @@ GUARD &0DF0
     LDA abullets_on,X : BEQ nw_next_abullet
     STX abullet_idx
     JSR abullet_pos
-    LDA draw_y : CLC : ADC #3 : TAX : JSR beam_guard
-    JSR abullet_draw
+    JSR ua_show                     ; a low one is queued, not waited for: the beam may be 10ms off
     LDX abullet_idx : LDA #0 : STA abullets_on,X
 .nw_next_abullet
     DEX : BPL nw_abullets
@@ -571,10 +568,9 @@ GUARD &0DF0
 .nw_drop
     JSR intro_frame
     JSR drop_rows
-    LDA row_y : CMP row_y0 : BNE nw_drop    ; the rows all land together
-    LDA #0 : STA intro
-    JSR boss_pos                    ; the beam is past row 0, so past the boss's rows too
-    JMP bf_place
+    LDA row_y : SBC row_y0 : BNE nw_drop    ; C set by drop_rows; the rows all land together
+    STA intro
+    RTS
 
 .intro_frame
     LDA #0
@@ -649,6 +645,11 @@ GUARD &0DF0
 
 ; top down, in beam order
 .drop_rows
+    LDA row_y : CMP #FORM_Y - 1 : BNE dr_rows
+    LDA #FX_START + BOSS_DX : STA boss_x    ; draw ahead of the beam while waiting for row 0
+    LDA #FORM_Y - ROW_STEP : STA boss_y
+    JSR boss_draw
+.dr_rows
     LDX #0
 .dr_row
     STX form_row
@@ -671,17 +672,26 @@ GUARD &0DF0
     STA draw_y
     LDA row_spr,X : ORA row_anim,X : CLC : ADC #VERT_OFS : STA draw_id
     LDA #ALIEN_H : JSR uf_guard_h   ; old and new rows: ALIEN_H + 1 high
-.dr_col
-    LDX loop_i
-    LDA alive,X : BEQ dr_col_next
-    LDA slot_px,X : CLC : ADC #FX_START : STA draw_x  ; inlined slot_pos: row_x = FX_START, no breath
-    JSR plot_delta
-.dr_col_next
-    INC loop_i
-    LDX loop_i : LDA slot_col,X : BNE dr_col
+    LDA #FX_START : STA tmp2 : JSR uf_col
     LDX form_row : INC row_y,X
 .dr_next
     LDX form_row : INX : CPX #FORM_ROWS : BNE dr_row
+    RTS
+
+.uf_col
+    LDX form_row : LDA row_bofs,X : STA old_x
+.uf_col_loop
+    LDX loop_i
+    LDA alive,X : CMP #ALIVE_HOME : BNE uf_next
+    LDA old_x : CLC : ADC slot_col,X : TAY
+    LDA tmp2 : ADC slot_px,X : ADC breath,Y : STA draw_x
+    JSR plot_delta
+.uf_next
+    LDX loop_i : INX : INX : STX loop_i
+    LDA slot_col,X : LSR A : BNE uf_col_loop    ; even columns 0, 2, 4 then odd 1, 3, 5: same x AND 1
+    BCS uf_ret                                  ; after column 5: slot_col + 6 * r + 7 is 1
+    TXA : SBC #4 : STA loop_i : BPL uf_col_loop
+.uf_ret
     RTS
 
 .stamp_scores
@@ -953,10 +963,11 @@ ORG &0E00
     EQUB 1, 2, 4, 8, 16, 32, 64
 .ubo_lo
     EQUB LO(update_formation), LO(update_bullet_0), LO(update_bullet_1), LO(update_diver)
-    EQUB LO(update_abullet_0), LO(update_abullet_1), LO(update_abullet_2)
+    EQUB LO(update_abullet), LO(update_abullet), LO(update_abullet)
 .ubo_hi
     EQUB HI(update_formation), HI(update_bullet_0), HI(update_bullet_1), HI(update_diver)
-    EQUB HI(update_abullet_0), HI(update_abullet_1), HI(update_abullet_2)
+    EQUB HI(update_abullet), HI(update_abullet), HI(update_abullet)
+ASSERT ABULLETS <= 4 AND BULLETS = 2              ; update_abullet: AND #3; update_bullet_0: Y - 1
 
 ; in vblank: in MODE 2 each logical colour is one ULA palette entry, so no plots
 .pulse_capsule                      ; 8 frames each colour
@@ -1092,7 +1103,8 @@ ORG &0E00
 ; wait for the beam to pass row X, so a plot there shows next frame (A unused)
 .beam_guard
     LDA defer : BNE bg_done         ; queued: drawn next frame, ahead of the beam
-    TXA : LSR A : LSR A : CLC : ADC #BEAM_TOP + 2 : STA guard_bot
+    TXA : CLC : ADC #2 : ROR A : LSR A          ; (X + 2) DIV 4, 9-bit: row 4k+1 ends 40us before unit k + 8
+    CLC : ADC #BEAM_TOP + 1 : STA guard_bot
 .bg_wait
     LDA USR_T2H : EOR #&FF          ; elapsed, in 256us units
     CMP guard_bot : BCC bg_wait
@@ -1136,10 +1148,8 @@ ORG &0E00
     RTS
 .up_play
     LDX ships_shown : INX : CPX lives : BCS up_keys
-    STX ships_shown : DEX : TXA : JSR spare_x : STA draw_x
-    LDA #SPARE_Y : STA draw_y
-    LDA #SPR_PLAYER : STA draw_id
-    JSR plot_image
+    STX ships_shown : DEX : TXA : JSR spare_x : TAX
+    LDY #SPARE_Y : LDA #SPR_PLAYER : JSR plot_at
 .up_keys
     LDA keys : AND #KEY_LEFT : BEQ up_not_left
     LDA player_x : BEQ up_done
@@ -1163,23 +1173,14 @@ ORG &0E00
     STA tmp : ASL A : ASL A : ADC tmp : ASL A
     RTS
 
-.draw_player
-    LDA #SPR_PLAYER : STA draw_id
-    LDA player_x : STA draw_x
-    LDA player_row : STA draw_y
-    JMP plot_image
-
 ; --- Player bullets ---
 
-.update_bullet_0
-    LDX #0 : BEQ ub_slot
 .update_bullet_1                    ; a single shot leaves this slot to the capsule
-    LDA power : ORA bullets_on + 1 : BNE ub_1
+    LDA power : ORA bullets_on + 1 : BNE update_bullet_0
     LDA bonus_on : BEQ up_done
     JMP update_bonus
-.ub_1
-    LDX #1
-.ub_slot
+.update_bullet_0                    ; Y = order entry 1 or 2 (from ubo_run): bullet Y - 1
+    DEY : TYA : TAX
     JSR bullet_load
     JSR update_bullet
     LDX bullet_idx
@@ -1207,11 +1208,10 @@ ORG &0E00
     LDA #PLAYER_Y - 4 : STA bullet_y
     LDA #1 : STA bullet_on
     SFX SFX_FIRE
-    LDA #PLAYER_Y - 4 : LDX #PLAYER_Y - 1 : JSR beam_guard
+    LDX #PLAYER_Y - 1 : JSR beam_guard
     JMP draw_bullet
 .ub_move
     LDA bullet_y : CLC : ADC #3 : TAX
-    LDA bullet_y : SBC #BULLET_SPEED - 1    ; C clear from the ADC
     JSR beam_guard                  ; old and new positions together
     LDA bullet_y : SEC : SBC #BULLET_SPEED
     CMP #BULLET_TOP : BCC ub_off
@@ -1227,13 +1227,11 @@ ORG &0E00
     RTS
 
 .draw_bullet
-    LDA #SPR_BULLET : STA draw_id
-    LDA bullet_x : STA draw_x
-    LDA bullet_y : STA draw_y
-    JMP plot_image
+    LDA #SPR_BULLET : LDX bullet_x : LDY bullet_y
+    JMP plot_at
 
 .kill_bullet
-    LDA bullet_y : LDX bullet_y : JSR beam_guard_alien
+    LDA bullet_y : JSR beam_guard_alien
     JSR draw_bullet
     LDA #0 : STA bullet_on
     RTS
@@ -1246,7 +1244,7 @@ ORG &0E00
     LDA lead_gone : BNE cbh_wings
     LDA diver_y : LDX diver_x : JSR cbh_near : BCS cbh_wings
     JSR kill_bullet
-    LDA diver_y : STA hit_y : TAX : JSR beam_guard_alien
+    LDA diver_y : STA hit_y : JSR beam_guard_alien
     JSR draw_diver
     LDX diver_slot : LDA #ALIVE_GONE : STA alive,X
     LDA wing_on : ORA wing_on + 1 : STA lead_gone
@@ -1266,7 +1264,7 @@ ORG &0E00
     JMP cbh_form
 .cbh_whit
     JSR kill_bullet
-    LDA hit_y : TAX : JSR beam_guard_alien
+    LDA hit_y : JSR beam_guard_alien
     LDX wing_k : JSR draw_wing
     LDX wing_k : LDY wing_slot,X
     LDA #ALIVE_GONE : STA alive,Y : STA wing_on,X
@@ -1363,13 +1361,8 @@ ORG &0E00
     INC fire_n
     RTS
 
-.update_abullet_0
-    LDX #0 : BEQ ua_slot
-.update_abullet_1
-    LDX #1 : BNE ua_slot
-.update_abullet_2
-    LDX #2
-.ua_slot
+.update_abullet                     ; Y = order entry 4-6 (from ubo_run): bullet Y - 4
+    TYA : AND #3 : TAX
     STX abullet_idx
     LDA abullets_on,X : BNE ua_move
     LDY fire_n : BEQ ua_done
@@ -1378,7 +1371,8 @@ ORG &0E00
     LDA #1 : STA abullets_on,X
     LDA fire_y,Y : STA abullets_y,X
     JSR abullet_pos
-    CMP #DEFER_Y : BCC ua_now       ; A = draw_y
+.ua_show                            ; A = draw_y
+    CMP #DEFER_Y : BCC ua_now
     INC defer                       ; low: queued for the next frame's start
     JSR abullet_draw
     DEC defer
@@ -1438,10 +1432,8 @@ ORG &0E00
     LDA slot_x : STA boss_x
     LDA slot_y : STA boss_y
 .boss_draw
-    LDA #SPR_BOSS : STA draw_id
-    LDA boss_x : STA draw_x
-    LDA boss_y : STA draw_y
-    JMP plot_image
+    LDA #SPR_BOSS : LDX boss_x : LDY boss_y
+    JMP plot_at
 .bf_ret
     RTS
 
@@ -1453,37 +1445,26 @@ ORG &0E00
     JMP uf_breathe
 
 .uf_sway
-    LDA row_x,X : STA old_x
+    LDA row_x,X : STA tmp2
     CLC : ADC row_dir,X : STA row_x,X
     CMP #FX_MIN : BEQ uf_flip
     CMP #FX_MAX : BNE uf_moved
 .uf_flip
     LDA row_dir,X : EOR #&FE : STA row_dir,X    ; 1 <-> &FF
 .uf_moved
-    LDY #0
-    LDA row_x,X : CMP old_x : BCS uf_right
+    LDA row_x,X : CMP tmp2 : BCS uf_right       ; moving right: it sits at the old x
+    STA tmp2                                    ; moving left: the delta starts at the new x
     LDA frame : AND #FLAP_SKIP : BNE uf_dir
-    LDA draw_id : EOR #1 : STA draw_id          ; moving left: the delta starts at the new frame
+    LDA draw_id : EOR #1 : STA draw_id          ; and at the new frame
     BNE uf_flap
 .uf_right
-    DEY                             ; moving right: it sits at the old x
     LDA frame : AND #FLAP_SKIP : BNE uf_dir
 .uf_flap
     LDA row_anim,X : EOR #1 : STA row_anim,X    ; flap: cross delta, so flapping costs no extra plot
     LDA draw_id : CLC : ADC #CROSS_OFS : STA draw_id
 .uf_dir
-    STY tmp2
     JSR uf_guard
-.uf_col
-    LDX loop_i
-    LDA alive,X : CMP #ALIVE_HOME : BNE uf_next
-    JSR slot_pos
-    LDA slot_x : CLC : ADC tmp2 : STA draw_x
-    JSR plot_delta
-.uf_next
-    INC loop_i
-    LDX loop_i : LDA slot_col,X : BNE uf_col    ; stop when the next slot starts a row
-    RTS
+    JMP uf_col
 
 .uf_breathe
     LDA row_bofs,X : STA old_x
@@ -1538,7 +1519,7 @@ ORG &0E00
 .uf_guard
     LDA #ALIEN_H - 1
 .uf_guard_h                         ; A = height - 1
-    CLC : ADC draw_y : TAX : LDA draw_y
+    CLC : ADC draw_y : TAX
     JSR beam_guard
     LDA form_row : ASL A : ADC form_row : ASL A : STA loop_i
     RTS
@@ -1737,7 +1718,7 @@ ORG &0E00
     LDA diver_y : CMP new_y : BCS ud_lower
     LDA new_y
 .ud_lower
-    SEC : ADC tmp2 : TAX            ; + 1: a wing may step down
+    SEC : ADC tmp2                  ; + 1: a wing may step down
     JSR beam_guard_alien
     JSR draw_group
     LDA new_x : STA diver_x
@@ -1913,49 +1894,49 @@ ORG &0E00
 
 ; Column-major so one X index walks every column; column addresses are patched in.
 ; Each image stores only the columns it uses; the row loop starts at its last one.
+.draw_player
+    LDA #SPR_PLAYER : LDX player_x : LDY player_row
+.plot_at                            ; A = id, X = x, Y = y
+    STA draw_id : STX draw_x : STY draw_y
 .plot_image
     LDA defer : BNE queue_image
-    LDA draw_x : AND #1 : STA tmp
     LDA draw_id : CMP #SPR_BULLET_STEP : BCC pi_index
     CMP #SPR_BONUS : BCS pi_index
     JMP plot_narrow
-.pi_index
-    ASL A : ORA tmp : TAX
-    LDA img_lo,X : STA PL_COL0 + 1
-    LDA img_hi,X : STA PL_COL0 + 2
-    LDA img_entry,X
-    JMP plot
 
 ; applying it again moves back, so a move left from x uses the delta at x - 1
 .plot_delta
     LDA defer : BNE queue_delta
-    LDA draw_x : AND #1 : STA tmp
-    LDA draw_id : ASL A : ORA tmp : TAX
-    LDA dlt_lo,X : STA PL_COL0 + 1
-    LDA dlt_hi,X : STA PL_COL0 + 2
-    LDA dlt_entry,X
-
-.plot                               ; A = offset of the first column's code from pl_col
-    CLC : ADC #LO(pl_col) : STA pl_row + 1
-    LDA #HI(pl_col) : ADC #0 : STA pl_row + 2
+    LDA draw_id : CLC : ADC #(dlt_lo - img_lo) DIV 2
+.pi_index
+    TAY
+    LDA draw_x : LSR A
+    TYA : ROL A : TAX
     LDY draw_id : LDA spr_h,Y : STA draw_h
-    CPY pl_last_id : BNE pl_patch   ; the same image as last time (a row of aliens):
-    LDA PL_COL0 + 1 : CMP pl_last_lo : BNE pl_patch   ; its columns are patched in already
-    LDA PL_COL0 + 2 : CMP pl_last_hi : BEQ pl_patched
+    CPX pl_last_id : BEQ pl_patched ; same table entry as last time: columns and pl_row already patched
 .pl_patch
-    STY pl_last_id
-    LDA PL_COL0 + 1 : STA pl_last_lo
-    LDA PL_COL0 + 2 : STA pl_last_hi
-    CLC
+    STX pl_last_id
+    CPX #dlt_lo - img_lo : LDA img_entry,X : BCC pl_entry  ; an image: its own table
+    LDA #9 : CPX #dlt_lo - img_lo + 2 : BCC pl_entry        ; a delta: the player's has 5 columns,
+    TXA : SBC #dlt_lo - img_lo + 2 * (SPR_FLAGSHIP + VERT_OFS) : CMP #12 : BCS pl_six
+    LSR A : LDA #9 : BCC pl_entry                           ; a vertical step's whole image 5 at even x
+.pl_six
+    LDA #0                                                  ; and the other aliens' 6
+.pl_entry
+    CLC : ADC #LO(pl_col) : STA pl_row + 1                  ; the high byte never changes
+    LDA img_lo,X : STA PL_COL0 + 1
+    LDY img_hi,X : STY PL_COL0 + 2
 FOR c, 1, SPR_BYTES - 1
-    LDA PL_COL0 - 9 * (c - 1) + 1 : ADC draw_h : STA PL_COL0 - 9 * c + 1
-    LDA PL_COL0 - 9 * (c - 1) + 2 : ADC #0 : STA PL_COL0 - 9 * c + 2
+    ADC draw_h : STA PL_COL0 - 9 * c + 1
+    BCC P% + 4 : INY : CLC
+    STY PL_COL0 - 9 * c + 2
 NEXT
 .pl_patched
     JSR screen_ptrs
+    LDA draw_y : AND #7 : TAY
     LDX #0
 .pl_row
-    JMP &FFFF                       ; patched: the image's last column
+    JMP pl_col                      ; patched: the image's last column
 .pl_col                             ; 9 bytes per column, last column first
 FOR c, SPR_BYTES - 1, 0, -1
     LDA &FFFF,X : BEQ P% + 6 : EOR (ptr0 + 2 * c),Y : STA (ptr0 + 2 * c),Y   ; a zero byte changes nothing
@@ -1967,12 +1948,14 @@ NEXT
 .pl_done
     RTS
 PL_COL0 = pl_col + 9 * (SPR_BYTES - 1)  ; column 0's LDA
+ASSERT HI(pl_col) = HI(PL_COL0) AND SPR_BYTES = 6 AND ALIEN_W = 10   ; pl_row's high byte; the delta entries
 
 ; one byte column, or two for a bullet step at odd x: no columns to patch.
 ; A = draw_id, tmp = draw_x AND 1. Leaves through pl_done, as plot does.
 .plot_narrow
     TAY : LDA spr_h,Y : STA draw_h
-    TYA : ASL A : ORA tmp : TAX
+    LDA draw_x : LSR A
+    TYA : ROL A : TAX
     LDA img_lo,X : STA pn_byte + 1
     LDA img_hi,X : STA pn_byte + 2
     LDA draw_y : LSR A : LSR A : LSR A : TAY
@@ -2004,26 +1987,26 @@ PL_COL0 = pl_col + 9 * (SPR_BYTES - 1)  ; column 0's LDA
     BNE pn_column
 ASSERT SPR_ABULLET = SPR_BULLET_STEP + 1 AND SPR_ABULLET_STEP = SPR_ABULLET + 1 AND SPR_BONUS = SPR_ABULLET + 2
 
-; out: ptr0.. = cells of byte columns from draw_x DIV 2 on draw_y's row, Y = draw_y AND 7
+; out: ptr0.. = cells of byte columns from draw_x DIV 2 on draw_y's row, Y = 0
 .screen_ptrs
     LDA draw_y : LSR A : LSR A : LSR A : TAY
     LDA draw_x : ROL A : ROL A : ROL A : AND #3 : STA tmp     ; draw_x DIV 64: the byte column * 8, high
     LDA draw_x : AND #&3E : ASL A : ASL A                     ; and low; carry clear (x < 160)
     ADC crow_lo,Y : STA ptr0
-    LDA crow_hi,Y : ADC tmp : STA ptr0 + 1
-FOR c, 1, SPR_BYTES - 1
-    LDA ptr0 : ADC #8 * c : STA ptr0 + 2 * c
-    LDA ptr0 + 1 : ADC #0 : STA ptr0 + 2 * c + 1
-NEXT
-    LDA draw_y : AND #7 : TAY
-    RTS
+    LDA crow_hi,Y : ADC tmp
+    BCC sp_cols                     ; always: carry clear
 
 ; ptr0.. down one character row; out: Y = 0
-.next_cell                          ; unrolled: ptr0,Y would be absolute,Y
-    CLC                             ; the high bytes never carry: screen < &8000
-FOR c, 0, SPR_BYTES - 1
-    LDA ptr0 + 2 * c : ADC #LO(640) : STA ptr0 + 2 * c
-    LDA ptr0 + 2 * c + 1 : ADC #HI(640) : STA ptr0 + 2 * c + 1
+.next_cell
+    LDA ptr0 : ADC #LO(640) - 1 : STA ptr0  ; carry set by CPY #8
+    LDA ptr0 + 1 : ADC #HI(640)     ; the high byte never carries: screen < &8000
+.sp_cols                            ; A = ptr0's high byte, C clear: the other columns follow ptr0
+    STA ptr0 + 1 : TAY              ; Y: X is pl_row's row counter
+    LDA ptr0
+FOR c, 1, SPR_BYTES - 1
+    ADC #8 : STA ptr0 + 2 * c
+    BCC P% + 4 : INY : CLC
+    STY ptr0 + 2 * c + 1
 NEXT
     LDY #0
     RTS
@@ -2161,15 +2144,10 @@ NEXT
     EQUB ALIVE_HOME
 .slot_col                           ; one extra entry so the last row's walk ends on 0
 FOR i, 0, FORM_COUNT : EQUB i MOD FORM_COLS : NEXT
+    EQUB 1                          ; ends uf_col's odd pass on the last row
 
-.dive_delays
-    EQUB 80, 55, 40, 30, 22, 16
-.burst_mins                         ; this or one more: 3 at most
-    EQUB 1, 2, 2, 2, 2, 2
 .afire_tops
     EQUB 96, 80, 64, 56, 48, 40
-.afire_ranges
-    EQUB 24, 32, 40, 44, 48, 52
 
 .row_y0
 FOR r, 0, FORM_ROWS - 1 : EQUB FORM_Y + r * ROW_STEP : NEXT
@@ -2198,10 +2176,6 @@ NEXT
 FOR r, 0, FORM_ROWS - 1 : FOR c, 0, FORM_COLS DIV 2 - 1
     EQUB r * FORM_COLS + FORM_COLS DIV 2 - 1 - c, r * FORM_COLS + FORM_COLS DIV 2 + c
 NEXT : NEXT
-.flank
-    EQUB -FLANK AND &FF, FLANK
-.step_max
-    EQUB DIVE_XMAX, DIVER_SPEED
 .step_min
     EQUB -DIVE_XMAX AND &FF, -DIVER_SPEED AND &FF
 ; Peel-off half loop; dx is for a loop to the right
@@ -2292,9 +2266,6 @@ ENDMACRO
 MACRO DLT_HI base, w, h
     EQUB HI(base), HI(base + (w DIV 2 + 1) * h)
 ENDMACRO
-MACRO DLT_ENTRY w
-    EQUB 9 * (SPR_BYTES - w DIV 2 - 1), 9 * (SPR_BYTES - (w + 1) DIV 2 - 1)
-ENDMACRO
 
 ; Logical colours: 1 red, 2 pulsing yellow, 3 the boss's flashing, 4 blue, 5 magenta, 6 cyan, 7 white
 ART_PLAYER = "00077000" + "00077000" + "00777700" + "06755760" + "66777766" + "67777776" + "60077006" + "00500500"
@@ -2374,30 +2345,15 @@ ART_DRONE_B    = "0040000400" + "0040000400" + "6055555506" + "6574554756" + "05
     EQUB LO(gfx_bonus_0), LO(gfx_bonus_0)
     IMG_LO gfx_boss, ALIEN_W, ALIEN_H
     EQUB LO(gfx_expl), LO(gfx_expl)   ; either shift: it never moves
-.img_hi
-    IMG_HI gfx_player, 8, 8 : IMG_HI gfx_bullet, 2, 4
-    IMG_HI gfx_flagship, ALIEN_W, ALIEN_H : IMG_HI gfx_flagship_b, ALIEN_W, ALIEN_H
-    IMG_HI gfx_escort, ALIEN_W, ALIEN_H : IMG_HI gfx_escort_b, ALIEN_W, ALIEN_H
-    IMG_HI gfx_drone, ALIEN_W, ALIEN_H : IMG_HI gfx_drone_b, ALIEN_W, ALIEN_H
-    IMG_HI gfx_bullet_step, 2, 4 + BULLET_SPEED
-    IMG_HI gfx_abullet, 1, 4 : IMG_HI gfx_abullet_step, 1, 4 + ABULLET_SPEED
-    EQUB HI(gfx_bonus_0), HI(gfx_bonus_0)
-    IMG_HI gfx_boss, ALIEN_W, ALIEN_H
-    EQUB HI(gfx_expl), HI(gfx_expl)
-.img_entry
-    IMG_ENTRY 8 : IMG_ENTRY 2
-    IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W
-    IMG_ENTRY 2
-    IMG_ENTRY 1 : IMG_ENTRY 1
-    IMG_ENTRY BONUS_W
-    IMG_ENTRY ALIEN_W
-    IMG_ENTRY EXPL_W
 .dlt_lo
-    DLT_LO gfx_player_d, 8, 8 : EQUB 0, 0
+    DLT_LO gfx_player_d, 8, 8
+.flank                              ; in the holes: ids 1 and 8-10 have no delta
+    EQUB -FLANK AND &FF, FLANK
     DLT_LO gfx_flagship_d, ALIEN_W, ALIEN_H : DLT_LO gfx_flagship_b_d, ALIEN_W, ALIEN_H
     DLT_LO gfx_escort_d, ALIEN_W, ALIEN_H : DLT_LO gfx_escort_b_d, ALIEN_W, ALIEN_H
     DLT_LO gfx_drone_d, ALIEN_W, ALIEN_H : DLT_LO gfx_drone_b_d, ALIEN_W, ALIEN_H
-    EQUB 0, 0, 0, 0, 0, 0             ; ids 8-10 only move vertically
+.dive_delays
+    EQUB 80, 55, 40, 30, 22, 16
     DLT_LO gfx_flagship_ab, ALIEN_W, ALIEN_H : DLT_LO gfx_flagship_ba, ALIEN_W, ALIEN_H
     DLT_LO gfx_escort_ab, ALIEN_W, ALIEN_H : DLT_LO gfx_escort_ba, ALIEN_W, ALIEN_H
     DLT_LO gfx_drone_ab, ALIEN_W, ALIEN_H : DLT_LO gfx_drone_ba, ALIEN_W, ALIEN_H
@@ -2410,12 +2366,25 @@ ART_DRONE_B    = "0040000400" + "0040000400" + "6055555506" + "6574554756" + "05
     DLT_LO gfx_flagship_up, ALIEN_W, ALIEN_H + 1 : DLT_LO gfx_flagship_b_up, ALIEN_W, ALIEN_H + 1
     DLT_LO gfx_escort_up, ALIEN_W, ALIEN_H + 1 : DLT_LO gfx_escort_b_up, ALIEN_W, ALIEN_H + 1
     DLT_LO gfx_drone_up, ALIEN_W, ALIEN_H + 1 : DLT_LO gfx_drone_b_up, ALIEN_W, ALIEN_H + 1
+.img_hi
+    IMG_HI gfx_player, 8, 8 : IMG_HI gfx_bullet, 2, 4
+    IMG_HI gfx_flagship, ALIEN_W, ALIEN_H : IMG_HI gfx_flagship_b, ALIEN_W, ALIEN_H
+    IMG_HI gfx_escort, ALIEN_W, ALIEN_H : IMG_HI gfx_escort_b, ALIEN_W, ALIEN_H
+    IMG_HI gfx_drone, ALIEN_W, ALIEN_H : IMG_HI gfx_drone_b, ALIEN_W, ALIEN_H
+    IMG_HI gfx_bullet_step, 2, 4 + BULLET_SPEED
+    IMG_HI gfx_abullet, 1, 4 : IMG_HI gfx_abullet_step, 1, 4 + ABULLET_SPEED
+    EQUB HI(gfx_bonus_0), HI(gfx_bonus_0)
+    IMG_HI gfx_boss, ALIEN_W, ALIEN_H
+    EQUB HI(gfx_expl), HI(gfx_expl)
 .dlt_hi
-    DLT_HI gfx_player_d, 8, 8 : EQUB 0, 0
+    DLT_HI gfx_player_d, 8, 8
+.step_max
+    EQUB DIVE_XMAX, DIVER_SPEED
     DLT_HI gfx_flagship_d, ALIEN_W, ALIEN_H : DLT_HI gfx_flagship_b_d, ALIEN_W, ALIEN_H
     DLT_HI gfx_escort_d, ALIEN_W, ALIEN_H : DLT_HI gfx_escort_b_d, ALIEN_W, ALIEN_H
     DLT_HI gfx_drone_d, ALIEN_W, ALIEN_H : DLT_HI gfx_drone_b_d, ALIEN_W, ALIEN_H
-    EQUB 0, 0, 0, 0, 0, 0             ; ids 8-10 only move vertically
+.burst_mins                         ; this or one more: 3 at most
+    EQUB 1, 2, 2, 2, 2, 2
     DLT_HI gfx_flagship_ab, ALIEN_W, ALIEN_H : DLT_HI gfx_flagship_ba, ALIEN_W, ALIEN_H
     DLT_HI gfx_escort_ab, ALIEN_W, ALIEN_H : DLT_HI gfx_escort_ba, ALIEN_W, ALIEN_H
     DLT_HI gfx_drone_ab, ALIEN_W, ALIEN_H : DLT_HI gfx_drone_ba, ALIEN_W, ALIEN_H
@@ -2428,14 +2397,14 @@ ART_DRONE_B    = "0040000400" + "0040000400" + "6055555506" + "6574554756" + "05
     DLT_HI gfx_flagship_up, ALIEN_W, ALIEN_H + 1 : DLT_HI gfx_flagship_b_up, ALIEN_W, ALIEN_H + 1
     DLT_HI gfx_escort_up, ALIEN_W, ALIEN_H + 1 : DLT_HI gfx_escort_b_up, ALIEN_W, ALIEN_H + 1
     DLT_HI gfx_drone_up, ALIEN_W, ALIEN_H + 1 : DLT_HI gfx_drone_b_up, ALIEN_W, ALIEN_H + 1
-.dlt_entry
-    DLT_ENTRY 8 : EQUB 0, 0
-    DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W
-    EQUB 0, 0, 0, 0, 0, 0
-    DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W : DLT_ENTRY ALIEN_W
+.img_entry
+    IMG_ENTRY 8 : IMG_ENTRY 2
     IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W
-    FOR i, 21, 32 : DLT_ENTRY ALIEN_W : NEXT
-
+.afire_ranges                       ; in the hole: ids 8-10 (plot_narrow) never read img_entry
+    EQUB 24, 32, 40, 44, 48, 52
+    IMG_ENTRY BONUS_W
+    IMG_ENTRY ALIEN_W
+    IMG_ENTRY EXPL_W
 .ula_setup                          ; logical * 16 + physical EOR 7
     EQUB STAR_COLOUR * 16 + (7 EOR 7)
     EQUB 9 * 16 + (1 EOR 7)         ; 9-15: a sprite colour over a star shows the sprite
@@ -2464,7 +2433,7 @@ GUARD &0800
     RTS
 .ubn_move
     LDA bonus_y : ADC #ALIEN_H : TAX   ; C clear: bonus_on was 1
-    LDA bonus_y : JSR beam_guard    ; old and new positions together
+    JSR beam_guard                  ; old and new positions together
     JSR bonus_draw
     INC bonus_y
     LDA bonus_y : CMP #BONUS_BOTTOM : BCS ubn_off
@@ -2492,10 +2461,8 @@ GUARD &0800
 .bn_lift
     SBC #BONUS_LIFT : STA bonus_y
 .bonus_draw
-    LDA #SPR_BONUS : STA draw_id
-    LDA bonus_x : STA draw_x
-    LDA bonus_y : STA draw_y
-    JMP plot_image
+    LDA #SPR_BONUS : LDX bonus_x : LDY bonus_y
+    JMP plot_at
 
 ; Each guard fires once, and only if its shot won't pass over the boss or the other
 ; guard (checked even once shot: their path flies on).
@@ -2527,10 +2494,8 @@ GUARD &0800
 .ux_plot
     LDA expl_y : CMP #DEFER_Y : ROL defer      ; low: queued, drawn ahead of the beam next frame
     ADC #ALIEN_H - 1 : TAX : JSR beam_guard     ; carry clear: defer was 0
-    LDA expl_x : STA draw_x
-    LDA expl_y : STA draw_y
-    LDA #SPR_EXPL : STA draw_id
-    JSR plot_image
+    LDA #SPR_EXPL : LDX expl_x : LDY expl_y
+    JSR plot_at
     LSR defer
 .ux_ret
     RTS
@@ -2552,7 +2517,7 @@ GUARD &01C3
     LDA alive + BOSS_SLOT : CMP #ALIVE_HOME : BNE cbh_rows
     LDA boss_y : LDX boss_x : JSR cbh_near : BCS cbh_rows
     JSR kill_bullet
-    LDA boss_y : STA hit_y : TAX : JSR beam_guard_alien
+    LDA boss_y : STA hit_y : JSR beam_guard_alien
     JSR boss_draw
     LDX #BOSS_SLOT : LDA #ALIVE_GONE : STA alive,X
     JMP cbh_scored
@@ -2577,7 +2542,7 @@ GUARD &01C3
 .cbh_hit
     STX loop_i
     JSR kill_bullet
-    LDX loop_i : JSR slot_pos : LDA slot_y : TAX : JSR beam_guard_alien
+    LDX loop_i : JSR slot_pos : LDA slot_y : JSR beam_guard_alien
     LDX loop_i
     JSR draw_slot_expl
     LDX loop_i : LDA #ALIVE_GONE : STA alive,X
@@ -2585,18 +2550,14 @@ GUARD &01C3
     SFX SFX_HIT
     LDA #&01 : JMP add_score
 
-; A, X = top rows of two positions
+; A = top row
 .beam_guard_alien
-    STX tmp
-    CMP tmp : BCC bg8_ordered
-    TAX : LDA tmp
-.bg8_ordered
-    PHA : TXA : CLC : ADC #ALIEN_H - 1 : TAX : PLA
+    CLC : ADC #ALIEN_H - 1 : TAX
     JMP beam_guard
 
 .bonus_clear
     LDA bonus_on : BEQ bc_done
-    LDA bonus_y : TAX : JSR beam_guard_alien
+    LDA bonus_y : JSR beam_guard_alien
     JSR bonus_draw
     LDA #0 : STA bonus_on
 .bc_done
@@ -2622,11 +2583,10 @@ GUARD &03E0
 ; X = slot
 .draw_slot
     JSR slot_pos
-    LDA slot_x : STA draw_x
-    LDA slot_y : STA draw_y
     LDY slot_row,X
-    LDA row_spr,Y : ORA row_anim,Y : STA draw_id
-    JMP plot_image
+    LDA row_spr,Y : ORA row_anim,Y
+    LDX slot_x : LDY slot_y
+    JMP plot_at
 
 ; X = slot (boss too), preserved; out: slot_x / slot_y = its home now
 .home_pos
@@ -2761,6 +2721,7 @@ FOR e, 0, 3                         ; envelopes 1-4: the OS keeps them at &08C0
     LDX #LO(envelopes + 14 * e) : LDY #HI(envelopes + 14 * e) : LDA #8 : JSR OSWORD
 NEXT
     LDA #229 : LDX #1 : LDY #0 : JSR OSBYTE    ; ESCAPE is an ordinary key
+    LDA #16 : LDX #0 : JSR OSBYTE   ; no ADC channels: its end-of-conversion IRQ (~135us every ~10ms) stops
     LDA USR_ACR : AND #&DF : STA USR_ACR    ; timer 2 counts down once per microsecond
     LDA #&20 : STA USR_IER                  ; and never interrupts
     JMP title
@@ -2803,7 +2764,8 @@ IMG_END = IMG_B4 + b4_end - b4_start
 ASSERT main_start + HI(end - main_start + 255) * 256 <= loader  ; the copy never reaches the loader
 ASSERT IMG_END <= &7C00                                         ; the file loads below MODE 7's screen
 ASSERT end + IMG_END - loader <= loader                         ; the file image below doesn't overlap it
-ASSERT SPR_BONUS * 2 + 1 < img_hi - img_lo AND SPR_BONUS = CROSS_OFS + 2   ; spr_h: ALIEN_H, as the capsule
+ASSERT SPR_BONUS * 2 + 1 < dlt_lo - img_lo AND SPR_BONUS = CROSS_OFS + 2   ; spr_h: ALIEN_H, as the capsule
+ASSERT img_hi - dlt_lo = 70 AND dlt_hi - img_hi = 28 AND img_entry - dlt_hi = 70 AND dlt_lo - img_lo = 28   ; the hole tables kept every index in place
 
 COPYBLOCK loader, loader_end, end
 COPYBLOCK lo_start, lo_end, end + loader_end - loader

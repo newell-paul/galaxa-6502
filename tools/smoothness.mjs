@@ -267,6 +267,11 @@ const vbreath = signedTable(labels.vbreath);
 const levelTable = (name) => [...Array(LEVELS)].map((_, k) => m.readbyte(labels[name] + k));
 const diveDelays = levelTable("dive_delays"), burstMins = levelTable("burst_mins");
 const afireTops = levelTable("afire_tops"), afireRanges = levelTable("afire_ranges");
+// Start on the same game frame whatever the load time: the scripted input then meets the same game,
+// so busy_us compares builds of different sizes like for like (a 2-frame shift plays a different game).
+const CAPTURE_FRAME = 21;
+if (m.readbyte(zp.frame) > CAPTURE_FRAME) print(`capture starts late: frame ${m.readbyte(zp.frame)}`);
+while (m.readbyte(zp.frame) !== CAPTURE_FRAME) await m.runFor(500);
 capturing = true;
 while (captured.length < FRAMES) await m.runFor(20000);
 
