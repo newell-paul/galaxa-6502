@@ -8,12 +8,15 @@ OSRDCH = &FFE0
 OSWRCH = &FFEE
 OSWORD = &FFF1
 OSBYTE = &FFF4
+IRQ2V  = &0206
 KEYV   = &0228
 
 SCREEN       = &3000
 MODE7_SCREEN = &7C00
 
 ; User VIA timer 2: the raster clock (1 tick = 1us)
+USR_T1CL     = &FE64          ; timer 1: the ship's palette split
+USR_T1CH     = &FE65
 USR_T2L      = &FE68
 USR_T2H      = &FE69
 USR_ACR      = &FE6B
@@ -32,6 +35,9 @@ KEY_FIRE     = 4
 KEY_Z        = &61
 KEY_X        = &42
 KEY_RETURN   = &49
+KEY_P        = &37
+
+DEBUG =? 0                    ; make run-debug: P cycles the power level
 
 SYS_ORB      = &FE40          ; addressable latch: bit 3 = keyboard auto-scan
 SYS_DDRA     = &FE43
@@ -88,6 +94,8 @@ PLAYER_Y     = 232
 PLAYER_MAX_X = 148
 PLAYER_START = 72
 SPARE_Y      = 256 - 8
+WING_COLOUR  = 6              ; logical: cyan, the ship's wings; below SPLIT_Y it shows the power level
+SPLIT_Y      = PLAYER_Y - 12
 DIE_TIME     = 144
 FLASH_TIME   = 8
 DIE_BLINK    = 8              ; a power of 2
@@ -140,9 +148,10 @@ WARP_TIME    = 150
 WARP_VMAX    = 8
 INTRO_WARP   = 3
 
-BULLETS      = 2
+BULLETS      = 3              ; the third: rapid fire only
 BULLET_SPEED = 6              ; over the 4px height: the step image has a gap between old and new
 FIRE_DELAY   = 16
+RAPID_DELAY  = 12
 BULLET_TOP   = 8
 
 BONUS_W      = 7
@@ -171,7 +180,7 @@ BONUS_TICK   = 5                  ; then 100 every 100ms, each tick a semitone h
 TICK_PITCH   = 101
 TICK_TOP     = 249                ; the tick's pitch stops rising here
 DROP_Y       = 8
-ORDER_N      = 4 + ABULLETS   ; formation, 2 bullets, diver, enemy bullets
+ORDER_N      = 2 + BULLETS + ABULLETS   ; formation, bullets, diver, enemy bullets
 DEFER_Y      = 112            ; this low: drawn at the next frame's start, ahead of the beam
 EARLY_Y      = 144
 QUEUE_MAX    = 24
@@ -235,7 +244,7 @@ wing_k       = &7D
 lead_gone    = &7E            ; diver shot: its path flies on for its wings
 moved        = &7F
 keyv_os      = &81            ; 2: OS KEYV, restored for the title
-power        = &83
+power        = &83            ; 0 single shot, 1 double, 2 double and rapid fire
 bonus_on     = &84
 bonus_x      = &85
 bonus_y      = &86
@@ -351,14 +360,6 @@ GUARD &40
     SKIP 1
 .expl_y
     SKIP 1
-ORG &8A
-GUARD &90
-.bullets_on
-    SKIP BULLETS
-.bullets_x
-    SKIP BULLETS
-.bullets_y
-    SKIP BULLETS
 
 ; --- Run-time state ---
 ; language workspace: free, never saved to disc
@@ -388,6 +389,12 @@ GUARD &0800
     SKIP NUM_STARS
 .order_key
     SKIP ORDER_N
+.bullets_on
+    SKIP BULLETS
+.bullets_x
+    SKIP BULLETS
+.bullets_y
+    SKIP BULLETS
 .queue_x
 .font_buf                           ; OSWORD 10 scratch during the loader only
     SKIP QUEUE_MAX
@@ -447,7 +454,7 @@ GUARD &0DF0
     LDA #0 : STA keys : STA fire_cool : STA defer : STA queue_n : STA sfx : STA tune_n
     STA ships_shown : STA player_state
     STA power : STA bonus_on : STA stage_bonus
-    STA bullets_on : STA bullets_on + 1   ; CLS has wiped them
+    STA bullets_on : STA bullets_on + 1 : STA bullets_on + 2   ; CLS has wiped them
     LDX #ABULLETS - 1
 .ng_abullets
     STA abullets_on,X
@@ -627,7 +634,7 @@ GUARD &0DF0
     LDA #19 : JSR OSBYTE
     LDA bg_colour : STA ULA_PALETTE ; here so a hit ship's flash goes on between waves too
     LDA #&FF : STA USR_T2L : STA USR_T2H
-    RTS
+    JMP split_start
 
 .toggle_banner
     LDA #BANNER_Y : STA draw_y
@@ -833,10 +840,12 @@ ASSERT LO(MODE7_SCREEN + HS_ROW * 40 + HS_COL) >= 40
     EQUB &13, 2, 101, 2 : EQUB 3, 2, 117, 2 : EQUB 3, 2, 129, 2 : EQUB 3, 2, 149, 6
     EQUB &13, 2, 129, 4 : EQUB 3, 2, 117, 4 : EQUB 3, 2, 105, 4 : EQUB 3, 2, 89, 10
     EQUB &13, 2, TICK_PITCH, 1      ; the stage bonus tick: intro_frame raises its pitch
+    EQUB &13, 2, 229, 4             ; the capsule shot
 SND_POWER = 5 * 4
 SND_WAVE = 14 * 4
 SND_OVER = 18 * 4
 SND_TICK = 22 * 4
+SND_SHOT = 23 * 4
 
 .lo_end
 
@@ -894,19 +903,20 @@ ORG &0E00
     LDA bullets_y,X : STA order_key + 1,X
 .ubo_bullet_next
     DEX : BPL ubo_bullet
-    LDA bonus_on : BEQ ubo_diver    ; the capsule takes the second bullet's turn
-    LDA bonus_y : STA order_key + 2
+    LDA bonus_on : BEQ ubo_diver    ; the capsule shares the third bullet's turn: the higher goes by
+    LDA bonus_y : CMP order_key + 3 : BCS ubo_diver
+    STA order_key + 3
 .ubo_diver
-    LDA #&FF : STA order_key + 3
+    LDA #&FF : STA order_key + 1 + BULLETS
     LDA diver_state : BEQ ubo_abullets
     JSR group_depth                 ; the diver's group goes by its lowest
-    CLC : ADC diver_y : STA order_key + 3
+    CLC : ADC diver_y : STA order_key + 1 + BULLETS
 .ubo_abullets
     LDX #ABULLETS - 1
 .ubo_abullet
-    LDA #&FF : STA order_key + 4,X
+    LDA #&FF : STA order_key + 2 + BULLETS,X
     LDA abullets_on,X : BEQ ubo_abullet_next
-    LDA abullets_y,X : STA order_key + 4,X
+    LDA abullets_y,X : STA order_key + 2 + BULLETS,X
 .ubo_abullet_next
     DEX : BPL ubo_abullet
     LDA #0 : STA order_done : STA order_n
@@ -960,14 +970,14 @@ ORG &0E00
     JMP (order_vec)
 
 .bit_of
-    EQUB 1, 2, 4, 8, 16, 32, 64
+    EQUB 1, 2, 4, 8, 16, 32, 64, 128
 .ubo_lo
-    EQUB LO(update_formation), LO(update_bullet_0), LO(update_bullet_1), LO(update_diver)
+    EQUB LO(update_formation), LO(update_bullet_0), LO(update_bullet_1), LO(update_bullet_2), LO(update_diver)
     EQUB LO(update_abullet), LO(update_abullet), LO(update_abullet)
 .ubo_hi
-    EQUB HI(update_formation), HI(update_bullet_0), HI(update_bullet_1), HI(update_diver)
+    EQUB HI(update_formation), HI(update_bullet_0), HI(update_bullet_1), HI(update_bullet_2), HI(update_diver)
     EQUB HI(update_abullet), HI(update_abullet), HI(update_abullet)
-ASSERT ABULLETS <= 4 AND BULLETS = 2              ; update_abullet: AND #3; update_bullet_0: Y - 1
+ASSERT ABULLETS = 3 AND BULLETS = 3 AND ORDER_N = 8   ; update_abullet: AND #3, - 1; update_bullet_0: Y - 1; order_done: a byte
 
 ; in vblank: in MODE 2 each logical colour is one ULA palette entry, so no plots
 .pulse_capsule                      ; 8 frames each colour
@@ -977,6 +987,25 @@ ASSERT ABULLETS <= 4 AND BULLETS = 2              ; update_abullet: AND #3; upda
     EOR #STAR_COLOUR * 16           ; and its copy with the star bit set
     STA ULA_PALETTE
     RTS
+
+.split_start                        ; cyan wings down to SPLIT_Y, where timer 1 runs out
+    LDA #LO((BEAM_TOP + SPLIT_Y DIV 4) * 256) : STA USR_T1CL
+    LDA #HI((BEAM_TOP + SPLIT_Y DIV 4) * 256) : STA USR_T1CH
+    LDA wing_ula : STA ULA_PALETTE
+    EOR #STAR_COLOUR * 16 : STA ULA_PALETTE
+    RTS
+
+; IRQ2V: timer 1 runs out as the beam nears the ship, whose wings take the power level's colour
+.ship_split
+    LDA USR_T1CL                    ; clears the interrupt
+    TXA : PHA
+    LDX power : LDA wing_ula,X : STA ULA_PALETTE
+    EOR #STAR_COLOUR * 16 : STA ULA_PALETTE
+    PLA : TAX
+    LDA &FC                         ; the OS saved A here
+    RTI
+.wing_ula                           ; single shot cyan, double yellow, rapid fire red
+    EQUB WING_COLOUR * 16 + (6 EOR 7), WING_COLOUR * 16 + (3 EOR 7), WING_COLOUR * 16 + (1 EOR 7)
 
 ; --- Starfield ---
 
@@ -1175,11 +1204,21 @@ ASSERT ABULLETS <= 4 AND BULLETS = 2              ; update_abullet: AND #3; upda
 
 ; --- Player bullets ---
 
-.update_bullet_1                    ; a single shot leaves this slot to the capsule
+.update_bullet_2                    ; the capsule and rapid fire's third shot: each guards its own rows
+    LDA bonus_on : BEQ ub2_shot
+    JSR update_bonus
+.ub2_shot
+    LDA power : LSR A : ORA bullets_on + 2 : BEQ up_done
+    LDY #3
+    LDA bullets_on + 2 : BNE update_bullet_0
+    INC defer                       ; idle: a shot fired now is drawn next frame, as in the low pass
+    JSR update_bullet_0
+    DEC defer
+    RTS
+.update_bullet_1                    ; the double shot's second
     LDA power : ORA bullets_on + 1 : BNE update_bullet_0
-    LDA bonus_on : BEQ up_done
-    JMP update_bonus
-.update_bullet_0                    ; Y = order entry 1 or 2 (from ubo_run): bullet Y - 1
+    RTS
+.update_bullet_0                    ; Y = order entry 1-3 (from ubo_run): bullet Y - 1
     DEY : TYA : TAX
     JSR bullet_load
     JSR update_bullet
@@ -1203,7 +1242,11 @@ ASSERT ABULLETS <= 4 AND BULLETS = 2              ; update_abullet: AND #3; upda
     LDA bullet_on : BNE ub_move
     LDA fire_cool : BNE ub_done
     LDA keys : AND #KEY_FIRE : BEQ ub_done
-    LDA #FIRE_DELAY : STA fire_cool
+    LDX #FIRE_DELAY
+    LDA power : LSR A : BEQ ub_cool
+    LDX #RAPID_DELAY
+.ub_cool
+    STX fire_cool
     LDA player_x : CLC : ADC #3 : STA bullet_x
     LDA #PLAYER_Y - 4 : STA bullet_y
     LDA #1 : STA bullet_on
@@ -1238,6 +1281,11 @@ ASSERT ABULLETS <= 4 AND BULLETS = 2              ; update_abullet: AND #3; upda
 
 ; overlap: bullet_x - ax is -1..ALIEN_W - 1 and bullet_y - ay is -3..ALIEN_H - 1
 .check_bullet_hits
+    LDA bonus_on : BEQ cbh_aliens
+    LDX bonus_x : DEX
+    LDA bonus_y : JSR cbh_near : BCS cbh_aliens
+    JMP shoot_capsule
+.cbh_aliens
     LDA diver_state : BNE cbh_diver
     JMP cbh_form
 .cbh_diver
@@ -1361,8 +1409,8 @@ ASSERT ABULLETS <= 4 AND BULLETS = 2              ; update_abullet: AND #3; upda
     INC fire_n
     RTS
 
-.update_abullet                     ; Y = order entry 4-6 (from ubo_run): bullet Y - 4
-    TYA : AND #3 : TAX
+.update_abullet                     ; Y = order entry 5-7 (from ubo_run): bullet Y - 5
+    TYA : AND #3 : TAX : DEX
     STX abullet_idx
     LDA abullets_on,X : BNE ua_move
     LDY fire_n : BEQ ua_done
@@ -2011,6 +2059,14 @@ NEXT
     LDY #0
     RTS
 
+; every hit scores 100 and chimes; the capsule falls on, still to be caught
+.shoot_capsule
+    JSR kill_bullet
+    LDA #&10 : JSR add_score        ; BCD, the HUD adds a trailing 0
+    LDA #SND_SHOT : STA tune_x
+    LDA #1 : STA tune_n
+    RTS
+
 ; --- Keyboard, score and text ---
 
 ; Z wins if both directions are held
@@ -2026,7 +2082,23 @@ NEXT
     LDX #KEY_RETURN : JSR key_down : BNE rk_done
     LDA keys : ORA #KEY_FIRE : STA keys
 .rk_done
+IF DEBUG
+    LDX #KEY_P : JSR key_down       ; A = 0 down, &80 up
+    TAX : EOR dbg_up : AND dbg_up   ; just pressed
+    STX dbg_up
+    BEQ rk_ret
+    LDX power : INX : CPX #3 : BCC rk_power
+    LDX #0
+.rk_power
+    STX power
+    SFX SFX_POWER
+.rk_ret
+ENDIF
     RTS
+IF DEBUG
+.dbg_up
+    EQUB 0
+ENDIF
 
 ; X = matrix code, out: Z set if down. Direct VIA read: OSBYTE 129 took ~130us a key.
 ; IRQs off so the OS can't reprogram port A halfway through.
@@ -2431,18 +2503,22 @@ GUARD &0800
     LDA bonus_on : CMP #2 : BNE ubn_move
     DEC bonus_on
     RTS
-.ubn_move
-    LDA bonus_y : ADC #ALIEN_H : TAX   ; C clear: bonus_on was 1
+.ubn_move                           ; bonus_on 1 and 3 by turns: 3 falls 2px, so 1.5px a frame
+    EOR #2 : STA bonus_on
+    LSR A : LSR A : PHP             ; C: this frame falls 2px
+    LDA bonus_y : ADC #ALIEN_H : TAX   ; the new bottom row
     JSR beam_guard                  ; old and new positions together
     JSR bonus_draw
-    INC bonus_y
-    LDA bonus_y : CMP #BONUS_BOTTOM : BCS ubn_off
+    PLP
+    LDA bonus_y : ADC #1 : STA bonus_y
+    CMP #BONUS_BOTTOM : BCS ubn_off
     LDX player_state : BNE bonus_draw
     CMP #PLAYER_Y - 6 : BCC bonus_draw
     CMP #PLAYER_Y + 8 : BCS bonus_draw
     LDA player_x : SBC bonus_x : CLC : ADC #8   ; C clear from the BCS: x - capsule x - 1 + 8
     CMP #BONUS_W + 7 : BCS bonus_draw
-    INC power
+    LDA power : CMP #2 : BCS P% + 4
+    INC power                       ; a level up: the double shot, then rapid fire
     SFX SFX_POWER
 .ubn_off
     LDA #0 : STA bonus_on
@@ -2452,7 +2528,7 @@ GUARD &0800
 ; the beam is past the shot alien's rows, so past the capsule's: it starts above them
 .bonus_drop                         ; X = the slot shot (or a wing)
     CPX #BOSS_SLOT : BNE bn_ret
-    LDA power : ORA bonus_on : ORA bullets_on + 1 : BNE bn_ret
+    LDA bonus_on : BNE bn_ret
     LDA alive_count : BEQ bn_ret    ; the wave's last alien: the stage ends
     LDA #2 : STA bonus_on
     LDA bullet_x : SBC #(BONUS_W - 1) DIV 2 : AND #&FE : STA bonus_x   ; C set by the CPX; even: one image
@@ -2561,8 +2637,8 @@ GUARD &01C3
     JSR bonus_draw
     LDA #0 : STA bonus_on
 .bc_done
-    STA power                       ; A = 0
     RTS
+
 
 ; MODE 7 shows only &7C00 up, so this is unseen; the OS's own clear after VDU 22 shows
 ; old memory for a few frames.
@@ -2722,8 +2798,12 @@ FOR e, 0, 3                         ; envelopes 1-4: the OS keeps them at &08C0
 NEXT
     LDA #229 : LDX #1 : LDY #0 : JSR OSBYTE    ; ESCAPE is an ordinary key
     LDA #16 : LDX #0 : JSR OSBYTE   ; no ADC channels: its end-of-conversion IRQ (~135us every ~10ms) stops
-    LDA USR_ACR : AND #&DF : STA USR_ACR    ; timer 2 counts down once per microsecond
+    LDA USR_ACR : AND #&1F : STA USR_ACR    ; timer 2 counts down once per microsecond, timer 1 one-shot
     LDA #&20 : STA USR_IER                  ; and never interrupts
+    SEI
+    LDA #LO(ship_split) : STA IRQ2V : LDA #HI(ship_split) : STA IRQ2V + 1
+    CLI
+    LDA #&C0 : STA USR_IER                  ; timer 1 does
     JMP title
 .mv_block                           ; ptr0 -> ptr1: X pages, then A bytes
     STA tmp

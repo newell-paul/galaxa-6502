@@ -16,8 +16,9 @@
 //   - that each wave dives more often and fires more, and the last few aliens rush
 //   - that the stars show where RAM says, scroll and twinkle, and never mark a sprite
 //   - the stage bonus: reaching stage N > 1 scores N x 500, ticked in under its banner
-//   - the bonus capsule: only the boss drops it, it falls 1px per frame, and catching it
-//     turns the single shot into the double shot until a ship is lost or the stage ends
+//   - the bonus capsule: only the boss drops it, it falls 1.5px per frame, and catching it
+//     gives the double shot, then rapid fire, until a ship is lost, across stages
+//     (tools/capsule.mjs: each case, and the 100 points every hit scores)
 //   - the WAVE banner, and the rows dropping in from the top 1px per frame
 //   - dropped frames: the main loop missing a vsync
 //   - that SHIFT+BREAK boots to the title screen, and a hit ship flashes the screen
@@ -94,8 +95,12 @@ const PULSE_COLOUR = num("FLAG_COLOUR");
 const pulse = [num("FLAG_PHYS"), num("FLAG_PHYS") ^ num("FLAG_FLASH")];
 const BOSS_COLOUR = num("BOSS_COLOUR");
 const bossColours = [num("BOSS_PHYS")];
-const shows = (logical, phys) =>
-  logical === PULSE_COLOUR ? pulse.includes(phys) : logical === BOSS_COLOUR ? bossColours.includes(phys) : logical === phys;
+// The ship's wings: cyan, then from SPLIT_Y (timer 1, perhaps late) the power level's colour.
+const WING_COLOUR = num("WING_COLOUR"), SPLIT_Y = num("SPLIT_Y");
+const wingColours = [6, 3, 1];
+const shows = (logical, phys, y) =>
+  logical === PULSE_COLOUR ? pulse.includes(phys) : logical === BOSS_COLOUR ? bossColours.includes(phys) :
+  logical === WING_COLOUR && y >= SPLIT_Y ? wingColours.includes(phys) : logical === phys;
 
 // ------------------------------------------------------------------ emulator
 const DISC = path.join(ROOT, "galaxa.ssd");
@@ -219,11 +224,16 @@ function keysFor(i) {
   return held;
 }
 let inputFrame = 0;
+let rapidPoke = null;
 let down = new Set();
 onFrame = () => {
   if (!capturing) return;
   // soak test: keep the scripted player alive so every frame is gameplay
   if (m.readbyte(labels.lives) < 2) m.writebyte(labels.lives, 3);
+  // and once, well into the run and in play, upgrade a caught double shot to rapid fire so its
+  // third shot is exercised; the next snapshot is the first that can show it
+  if (rapidPoke == null && inputFrame > 2000 && m.readbyte(zp.power) === 1 && !m.readbyte(labels.player_state) && !m.readbyte(labels.intro))
+    m.writebyte(zp.power, 2), (rapidPoke = captured.length);
   const want = keysFor(inputFrame++);
   for (const k of down) if (!want.has(k)) m.processor.sysvia.keyUp(KEYS[k]);
   for (const k of want) if (!down.has(k)) m.processor.sysvia.keyDown(KEYS[k]);
@@ -292,7 +302,7 @@ const slotX = (ram, i) => {
 const slotY = (ram, i) => (i === BOSS_SLOT ? ram.rowY[0] - ROW_STEP : ram.rowY[Math.floor(i / FORM_COLS)]);
 // A sprite's blank pixels may show a star: white, where RAM puts a shown star.
 let starAt = new Uint8Array(160 * 256);
-const pixelOk = (logical, g, k) => shows(logical, g[k]) || (logical === 0 && g[k] === 7 && starAt[k]);
+const pixelOk = (logical, g, k) => shows(logical, g[k], Math.floor(k / 160)) || (logical === 0 && g[k] === 7 && starAt[k]);
 function matchAt(g, t, x, y) {
   for (let r = 0; r < t.rows.length; r++)
     for (let c = 0; c < t.w; c++) if (!pixelOk(t.rows[r][c], g, (y + r) * 160 + x + c)) return false;
@@ -365,6 +375,7 @@ function bcd(b) { return (b >> 4) * 10 + (b & 15); }
 const stageBonus = { paid: [], wrong: [] };
 let introScore = null;
 const bonusEv = { otherDrops: 0, catches: 0, doubleShots: 0, secondWithoutPower: 0, lostWithoutHit: 0, stageResets: 0, keptIntoStage: 0 };
+const rapidEv = { poked: 0, capsuleGrants: 0, wrongGrants: 0, stepDowns: 0, keptIntoStage: 0, thirdShots: 0, thirdWithoutRapid: [] };
 const spawns = [];
 const idles = [];
 let idleStart = null, rushStart = null, idlePaused = false;
@@ -482,9 +493,20 @@ for (let i = 0; i < captured.length; i++) {
     if (prev.power && !ram.power && ram.player_state !== 1) ram.intro ? bonusEv.stageResets++ : bonusEv.lostWithoutHit++;
     if (prev.intro && !ram.intro && ram.power) bonusEv.keptIntoStage++;
     if (ram.bullets[1].on && !prev.bullets[1].on) prev.power ? bonusEv.doubleShots++ : bonusEv.secondWithoutPower++;
+    // fired this frame: the power it fired with is now's (it may have just been granted)
+    if (ram.bullets[2].on && !prev.bullets[2].on) ram.power >= 2 ? rapidEv.thirdShots++ : rapidEv.thirdWithoutRapid.push([i, prev.power, ram.power]);
+    // rapid fire: a capsule caught with the double shot, kept until a ship is lost
+    if (prev.power < 2 && ram.power === 2) {
+      if (rapidPoke != null && i >= rapidPoke && prev.power === 1 && !rapidEv.poked) rapidEv.poked++;
+      else if (prev.bonus_on && !ram.bonus_on && prev.power === 1) rapidEv.capsuleGrants++;
+      else rapidEv.wrongGrants++;
+    }
+    if (prev.power === 2 && ram.power === 1) rapidEv.stepDowns++;
+    if (prev.intro && !ram.intro && ram.power === 2) rapidEv.keptIntoStage++;
   }
-  const bonus = ram.bonus_on === 1 && prev?.bonus_on === 1
-    ? sprites.find((s) => s.name === "bonus" && s.x === ram.bonus_x && Math.abs(s.y - ram.bonus_y) <= 1)
+  // falling: bonus_on 1 and 3 by turns (2 is its first frame)
+  const bonus = ram.bonus_on & 1 && prev?.bonus_on & 1
+    ? sprites.find((s) => s.name === "bonus" && s.x === ram.bonus_x && s.y <= ram.bonus_y && s.y >= prev.bonus_y)
     : null;
   tracks.bonus.push(bonus ? bonus.y : null);
 
@@ -540,12 +562,12 @@ for (let i = 0; i < captured.length; i++) {
     art.boss.forEach((row, r) => row.forEach((l, c) => l === BOSS_COLOUR && bossEv.colours.add(grid[(s.y + r) * 160 + s.x + c])));
   for (const s of sprites.filter((s) => s.name.startsWith("flagship")))
     art.flagship.forEach((row, r) => row.forEach((l, c) => l === PULSE_COLOUR && bossEv.pulseSeen.add(grid[(s.y + r) * 160 + s.x + c])));
-  // shot: gone (0) from home or a dive; it drops the capsule unless one falls or the ship
-  // is powered; it stays gone until the wave refills
+  // shot: gone (0) from home or a dive; it drops the capsule unless one falls; it stays
+  // gone until the wave refills
   if (prev && !newWave && prev.alive[BOSS_SLOT] && !ram.alive[BOSS_SLOT]) {
     bossEv.kills++, bossDead = true;
     if (!prev.bonus_on && ram.bonus_on) bossEv.drops++;
-    else if (!prev.bonus_on && !prev.power) bossEv.killsUndropped++;
+    else if (!prev.bonus_on) bossEv.killsUndropped++;
   }
   if (newWave) bossDead = false;
   else if (bossDead && ram.alive[BOSS_SLOT]) bossEv.backAfterKill++;
@@ -723,6 +745,7 @@ const report = {
   flash_frames: flashFrames,
   stage_bonus: stageBonus,
   bonus: { ...bonusEv, steps: steps(tracks.bonus) },
+  rapid: rapidEv,
 };
 
 const only = (hist, ok) => Object.keys(hist).every((k) => ok(Number(k)));
@@ -775,9 +798,13 @@ const checks = {
   "stars scroll and twinkle": starsMoved > 0 && starsHidden > 0,
   "only the boss drops a capsule": bonusEv.otherDrops === 0,
   "reaching stage N > 1 scores N x 500 under its banner": stageBonus.paid.some(([w]) => w >= 2) && stageBonus.wrong.length === 0,
-  "the capsule falls 1px per frame": report.bonus.steps[1] > 0 && only(report.bonus.steps, (d) => d === 1),
-  "single shot until the capsule is caught, double until a ship is lost or the stage ends": bonusEv.catches > 0 &&
-    bonusEv.doubleShots > 0 && bonusEv.secondWithoutPower === 0 && bonusEv.lostWithoutHit === 0 && bonusEv.keptIntoStage === 0,
+  "the capsule falls 1.5px per frame": report.bonus.steps[1] > 0 && report.bonus.steps[2] > 0 &&
+    only(report.bonus.steps, (d) => d === 1 || d === 2) &&
+    Math.abs(report.bonus.steps[1] - report.bonus.steps[2]) <= Math.max(4, (report.bonus.steps[1] + report.bonus.steps[2]) / 10),
+  "single shot until the capsule is caught, double until a ship is lost, across stages": bonusEv.catches > 0 &&
+    bonusEv.doubleShots > 0 && bonusEv.secondWithoutPower === 0 && bonusEv.lostWithoutHit === 0 && bonusEv.stageResets === 0,
+  "a third shot only with rapid fire, given only for a capsule caught with the double shot, kept across stages":
+    rapidEv.thirdShots > 0 && rapidEv.thirdWithoutRapid.length === 0 && rapidEv.wrongGrants === 0 && rapidEv.stepDowns === 0,
   "the boss shows its own colours, never the flagships'": report.boss.colours.length === new Set(bossColours).size &&
     report.boss.colours.every((c) => bossColours.includes(c)) && !report.boss.colours.some((c) => report.boss.pulseSeen.includes(c)),
   "the boss dives with two guards, as smoothly": report.boss.dives > 0 && report.boss.guardedFrames > 0 && report.wing_frames[1] > 0 &&
