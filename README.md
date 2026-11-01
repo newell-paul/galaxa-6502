@@ -23,6 +23,8 @@ Click the screen, then press any key to start.
   lose a ship.
 - Every hit on a falling capsule scores 100, so with rapid fire it pays to shoot the boss
   high up and keep the capsule in the air.
+- Each stage dives sooner and fires more, up to stage 8; after that the dives keep
+  coming a frame sooner each stage.
 - Three ships. Each new stage adds a bonus.
 
 | Target | Points |

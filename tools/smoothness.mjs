@@ -24,7 +24,8 @@
 //   - that SHIFT+BREAK boots to the title screen, and a hit ship flashes the screen
 // Exits non-zero if anything is not smooth.
 //
-// Usage: node tools/smoothness.mjs [frames] [--png dir] [--dump]
+// Usage: node tools/smoothness.mjs [frames] [--wave n] [--png dir] [--dump]
+//   --wave n starts the game at wave n: the late waves' pace and frame times
 //   JSBEEB_DIR defaults to ~/.local/share/jsbeeb
 import fs from "node:fs";
 import path from "node:path";
@@ -35,6 +36,8 @@ const FRAMES = Number(process.argv[2] ?? 3000);
 const pngIdx = process.argv.indexOf("--png");
 const PNG_DIR = pngIdx > 0 ? path.resolve(process.argv[pngIdx + 1]) : null;
 const DUMP = process.argv.includes("--dump");
+const waveIdx = process.argv.indexOf("--wave");
+const START_WAVE = waveIdx > 0 ? Number(process.argv[waveIdx + 1]) : 1;
 
 // ------------------------------------------------------------------ symbols and art
 const src = fs.readFileSync(path.join(ROOT, "galaxa.asm"), "utf8");
@@ -132,6 +135,12 @@ m.processor.sysvia.keyUp(utils.keyCodes.SHIFT);
 const idle = await untilInput(10);
 const prompt = [...Array(13)].map((_, i) => String.fromCharCode(m.readbyte(0x7c00 + 22 * 40 + 14 + i))).join("");
 const bootedToTitle = idle && prompt === "PRESS ANY KEY";
+// the first new_wave adds 1 to the BCD wave
+let startWaveSet = START_WAVE === 1;
+m.processor.debugInstruction.add((addr) => {
+  if (addr === labels.new_wave && !startWaveSet) m.writebyte(labels.wave, parseInt(String(START_WAVE - 1), 16)), (startWaveSet = true);
+  return false;
+});
 if (idle) await m.type(" ");
 console.log = print;
 
@@ -180,6 +189,7 @@ function snapshot() {
     diver_state: rb(zp.diver_state), diver_x: rb(zp.diver_x), diver_y: rb(zp.diver_y),
     diver_slot: rb(zp.diver_slot), wings, boss_x: rb(zp.boss_x), boss_y: rb(zp.boss_y),
     lead_gone: rb(zp.lead_gone), intro: rb(labels.intro), level: rb(labels.level),
+    dive_delay: rb(labels.dive_delays + rb(labels.level)), // the last level's shrinks each wave past it
     alive_count: rb(zp.alive_count),
     rowX, rowY, rowBofs, alive, lives: rb(labels.lives), stars,
     ships_shown: rb(labels.ships_shown), player_state: rb(labels.player_state), player_row: rb(labels.player_row),
@@ -275,7 +285,7 @@ const signedTable = (base) => [...Array((BREATH_MAX + 1) * FORM_COLS)].map((_, k
 const breath = signedTable(labels.breath);
 const vbreath = signedTable(labels.vbreath);
 const levelTable = (name) => [...Array(LEVELS)].map((_, k) => m.readbyte(labels[name] + k));
-const diveDelays = levelTable("dive_delays"), burstMins = levelTable("burst_mins");
+const burstMins = levelTable("burst_mins");
 const afireTops = levelTable("afire_tops"), afireRanges = levelTable("afire_ranges");
 // Start on the same game frame whatever the load time: the scripted input then meets the same game,
 // so busy_us compares builds of different sizes like for like (a 2-frame shift plays a different game).
@@ -421,7 +431,7 @@ for (let i = 0; i < captured.length; i++) {
     if (ram.player_state) idlePaused = true;
   }
   if (prev && !prev.diver_state && ram.diver_state === 1 && idleStart != null) {
-    if (!idlePaused) idles.push({ level: ram.level, gap: i - idleStart, rush: rushStart == null ? null : i - rushStart });
+    if (!idlePaused) idles.push({ level: ram.level, delay: ram.dive_delay, gap: i - idleStart, rush: rushStart == null ? null : i - rushStart });
     idleStart = rushStart = null;
   }
   if (idleStart == null) idlePaused = false;
@@ -779,7 +789,7 @@ const checks = {
     Object.entries(report.bursts).every(([l, h]) => only(h, (n) => n <= burstMins[l] + 1) && Object.keys(h).some((n) => n >= burstMins[l])),
   "each wave dives at its own pace": Object.keys(report.dive_gaps).length > 1 &&
     // a launch waits a frame while the chosen alien's row steps
-    idles.filter((d) => d.rush == null).every((d) => d.gap >= diveDelays[d.level] - 1 && d.gap <= diveDelays[d.level] + 3),
+    idles.filter((d) => d.rush == null).every((d) => d.gap >= d.delay - 1 && d.gap <= d.delay + 3),
   "the last few aliens rush": idles.some((d) => d.rush != null) &&
     idles.filter((d) => d.rush != null).every((d) => d.rush <= RUSH_DELAY + 2),
   "WAVE banner shows": report.banner_frames >= BANNER_TIME,

@@ -138,7 +138,8 @@ FX_MIN       = 4 + BREATH_MAX
 FX_MAX       = PLAYER_MAX_X - (FORM_COLS - 1) * COL_STEP - BREATH_MAX
 ASSERT FX_MIN < FX_START AND FX_START < FX_MAX    ; or the sway never turns
 
-LEVELS       = 6
+LEVELS       = 8
+DIVE_LAST    = 11             ; the last level's dive gap, a frame less each wave after it
 RUSH_COUNT   = 6
 RUSH_DELAY   = 8
 DIVE_STRIDE  = 7              ; coprime with 25: visits every slot
@@ -446,6 +447,7 @@ GUARD &0DF0
 
 .new_game
     LDA #0 : STA score_lo : STA score_hi : STA wave
+    LDA #DIVE_LAST : STA dive_delays + LEVELS - 1
     LDA #3 : STA lives
     LDA #PLAYER_START : STA player_x
     LDA #PLAYER_Y : STA player_row
@@ -512,10 +514,7 @@ GUARD &0DF0
 
 .new_wave
     SED : LDA wave : CLC : ADC #1 : STA wave : CLD
-    CMP #LEVELS + 1 : BCC nw_level
-    LDA #LEVELS : CLC
-.nw_level
-    SBC #0 : STA level              ; carry clear: - 1
+    JSR set_level
     LDX #FORM_SLOTS - 1
 .nw_fill
     LDA slot_start,X : STA alive,X
@@ -2072,6 +2071,17 @@ NEXT
     LDA #1 : STA tune_n
     RTS
 
+; A = the wave (BCD); past the last level, dives come a frame sooner each wave, down to a rush
+.set_level
+    CMP #LEVELS + 1 : BCC sl_level
+    LDA dive_delays + LEVELS - 1 : CMP #RUSH_DELAY + 1 : BCC sl_last
+    DEC dive_delays + LEVELS - 1
+.sl_last
+    LDA #LEVELS : CLC
+.sl_level
+    SBC #0 : STA level              ; carry clear: - 1
+    RTS
+
 ; --- Keyboard, score and text ---
 
 ; Z wins if both directions are held
@@ -2224,7 +2234,14 @@ FOR i, 0, FORM_COUNT : EQUB i MOD FORM_COLS : NEXT
     EQUB 1                          ; ends uf_col's odd pass on the last row
 
 .afire_tops
-    EQUB 96, 80, 64, 56, 48, 40
+    EQUB 96, 80, 64, 56, 48, 40, 36, 32
+.afire_ranges
+    EQUB 24, 32, 40, 44, 48, 52, 56, 60
+.burst_mins                         ; this or one more: 3 at most
+    EQUB 1, 2, 2, 2, 2, 2, 2, 2
+.dive_delays
+    EQUB 80, 55, 40, 30, 22, 16, 13, DIVE_LAST
+ASSERT P% - dive_delays = LEVELS
 
 .row_y0
 FOR r, 0, FORM_ROWS - 1 : EQUB FORM_Y + r * ROW_STEP : NEXT
@@ -2430,8 +2447,7 @@ ART_DRONE_B    = "0040000400" + "0040000400" + "6055555506" + "6574554756" + "05
     DLT_LO gfx_flagship_d, ALIEN_W, ALIEN_H : DLT_LO gfx_flagship_b_d, ALIEN_W, ALIEN_H
     DLT_LO gfx_escort_d, ALIEN_W, ALIEN_H : DLT_LO gfx_escort_b_d, ALIEN_W, ALIEN_H
     DLT_LO gfx_drone_d, ALIEN_W, ALIEN_H : DLT_LO gfx_drone_b_d, ALIEN_W, ALIEN_H
-.dive_delays
-    EQUB 80, 55, 40, 30, 22, 16
+    EQUB 0, 0, 0, 0, 0, 0             ; the hole for ids 8-10: spare
     DLT_LO gfx_flagship_ab, ALIEN_W, ALIEN_H : DLT_LO gfx_flagship_ba, ALIEN_W, ALIEN_H
     DLT_LO gfx_escort_ab, ALIEN_W, ALIEN_H : DLT_LO gfx_escort_ba, ALIEN_W, ALIEN_H
     DLT_LO gfx_drone_ab, ALIEN_W, ALIEN_H : DLT_LO gfx_drone_ba, ALIEN_W, ALIEN_H
@@ -2461,8 +2477,7 @@ ART_DRONE_B    = "0040000400" + "0040000400" + "6055555506" + "6574554756" + "05
     DLT_HI gfx_flagship_d, ALIEN_W, ALIEN_H : DLT_HI gfx_flagship_b_d, ALIEN_W, ALIEN_H
     DLT_HI gfx_escort_d, ALIEN_W, ALIEN_H : DLT_HI gfx_escort_b_d, ALIEN_W, ALIEN_H
     DLT_HI gfx_drone_d, ALIEN_W, ALIEN_H : DLT_HI gfx_drone_b_d, ALIEN_W, ALIEN_H
-.burst_mins                         ; this or one more: 3 at most
-    EQUB 1, 2, 2, 2, 2, 2
+    EQUB 0, 0, 0, 0, 0, 0             ; the hole for ids 8-10: spare
     DLT_HI gfx_flagship_ab, ALIEN_W, ALIEN_H : DLT_HI gfx_flagship_ba, ALIEN_W, ALIEN_H
     DLT_HI gfx_escort_ab, ALIEN_W, ALIEN_H : DLT_HI gfx_escort_ba, ALIEN_W, ALIEN_H
     DLT_HI gfx_drone_ab, ALIEN_W, ALIEN_H : DLT_HI gfx_drone_ba, ALIEN_W, ALIEN_H
@@ -2478,8 +2493,7 @@ ART_DRONE_B    = "0040000400" + "0040000400" + "6055555506" + "6574554756" + "05
 .img_entry
     IMG_ENTRY 8 : IMG_ENTRY 2
     IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W : IMG_ENTRY ALIEN_W
-.afire_ranges                       ; in the hole: ids 8-10 (plot_narrow) never read img_entry
-    EQUB 24, 32, 40, 44, 48, 52
+    EQUB 0, 0, 0, 0, 0, 0             ; the hole: ids 8-10 (plot_narrow) never read img_entry; spare
     IMG_ENTRY BONUS_W
     IMG_ENTRY ALIEN_W
     IMG_ENTRY EXPL_W

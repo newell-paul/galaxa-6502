@@ -48,6 +48,7 @@ title.asm: tools/title.mjs $(SRC)
 # Headless smoothness test: 8000 frames (160 seconds of play, into wave 3: the boss makes waves longer) in jsbeeb
 test: $(OUT)
 	JSBEEB_DIR=$(JSBEEB_DIR) node tools/smoothness.mjs 8000
+	JSBEEB_DIR=$(JSBEEB_DIR) node tools/smoothness.mjs 8000 --wave 7
 	JSBEEB_DIR=$(JSBEEB_DIR) node tools/capsule.mjs
 
 clean:
