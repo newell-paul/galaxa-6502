@@ -1,8 +1,11 @@
+; ------------------------------------------------------------------------------------------------------
+; Paul Newell 2026 - Version 0.9.0
 ; Galaxa - BBC Micro Model B fixed shooter (MODE 2, 6502, BeebAsm)
 ; Sprites are EORed and pre-shifted twice so they sit on any pixel; a 1px move is one delta plot,
 ; so no byte ever shows blank mid-frame. Objects redraw top to bottom just behind the beam
 ; (User VIA T2 restarts at vsync), so nothing tears. Sprites use colour bits 0-2, stars bit 3,
 ; so neither disturbs the other. Loads at &1900, copies down to &0E00 (DFS workspace, free once loaded).
+; ------------------------------------------------------------------------------------------------------
 
 VERSION = "0.9.0"                   ; tools/title.mjs puts it on the title screen
 

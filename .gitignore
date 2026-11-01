@@ -2,3 +2,4 @@
 *.lst
 *.sym
 title.asm
+.claude/
