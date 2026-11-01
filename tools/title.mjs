@@ -76,8 +76,8 @@ put(HS_ROW + 2, 33, G.white, SEP, 32 | SIX[1][0]);
 
 put(19, 4, A.green, "Z LEFT    X RIGHT    RETURN FIRE");
 put(PROMPT_ROW, PROMPT_COL - 1, FLASH, "PRESS ANY KEY");
-put(24, 9, A.blue, "(C) Paul Newell 2026");
-put(24, 39 - VERSION.length, "v" + VERSION);
+const credit = `(C) Paul Newell 2026  v${VERSION}`;
+put(24, (40 - credit.length) / 2 - 1 | 0, A.blue, credit);
 
 // pack it: skips for spaces, runs of 4 or more, the rest as they are
 const flat = scr.flat();
