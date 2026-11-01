@@ -69,7 +69,6 @@ const LEVELS = num("LEVELS");
 const RUSH_COUNT = num("RUSH_COUNT");
 const RUSH_DELAY = num("RUSH_DELAY");
 const FORM_Y = num("FORM_Y");
-const COL_STEP = num("COL_STEP");
 const ROW_STEP = num("ROW_STEP");
 const SPR_BULLET = num("SPR_BULLET");
 const BULLETS = num("BULLETS");
@@ -78,6 +77,7 @@ const ABULLETS = num("ABULLETS");
 const ABULLET_SPEED = num("ABULLET_SPEED");
 const BULLET_SPEED = num("BULLET_SPEED");
 const BURST_GAP = num("BURST_GAP");
+const BURST_PAUSE = num("BURST_PAUSE");
 const DIVER_SPEED = num("DIVER_SPEED");
 const BREATH_MAX = num("BREATH_MAX");
 const BANNER_Y = num("BANNER_Y");
@@ -190,7 +190,7 @@ function snapshot() {
     diver_slot: rb(zp.diver_slot), wings, boss_x: rb(zp.boss_x), boss_y: rb(zp.boss_y),
     lead_gone: rb(zp.lead_gone), intro: rb(labels.intro), level: rb(labels.level),
     dive_delay: rb(labels.dive_delays + rb(labels.level)), // the last level's shrinks each wave past it
-    alive_count: rb(zp.alive_count),
+    alive_count: rb(zp.alive_count), diver_vx: rb(labels.diver_vx),
     rowX, rowY, rowBofs, alive, lives: rb(labels.lives), stars,
     ships_shown: rb(labels.ships_shown), player_state: rb(labels.player_state), player_row: rb(labels.player_row),
     score: bcd(rb(labels.score_hi)) * 1000 + bcd(rb(labels.score_lo)) * 10, wave: bcd(rb(labels.wave)),
@@ -224,7 +224,7 @@ function keysFor(i) {
     for (let r = FORM_ROWS - 1; r >= 0 && target == null; r--)
       for (let c = 0; c < FORM_COLS; c++) {
         if (rb(labels.alive + r * FORM_COLS + c) !== 1) continue;
-        const x = rb(labels.row_x + r) + c * COL_STEP + breath[rb(labels.row_bofs + r) + c] + ALIEN_MID - 3;
+        const x = rb(labels.row_x + r) + slotPx[r * FORM_COLS + c] + breath[rb(labels.row_bofs + r) + c] + ALIEN_MID - 3;
         if (target == null || Math.abs(x - rb(zp.player_x)) < Math.abs(target - rb(zp.player_x))) target = x;
       }
   if (target == null && rb(labels.alive + BOSS_SLOT) === 1) target = rb(zp.boss_x) + ALIEN_MID - 3;
@@ -266,7 +266,7 @@ function beamLine() {
 m.processor.debugInstruction.add((addr) => {
   if (!capturing) return false;
   if (addr === labels.main_loop) busy.push(elapsedUs());
-  else if (addr === labels.af_shot) burstSteps.push({ frame: captured.length, level: m.readbyte(labels.level) });
+  else if (addr === labels.af_shot) burstSteps.push({ frame: captured.length, level: m.readbyte(labels.level), rush: m.readbyte(zp.alive_count) <= RUSH_COUNT });
   else if (addr === labels.plot_image || addr === labels.plot_delta)
     plotEntry = { line: beamLine(), y: m.readbyte(zp.draw_y), id: m.readbyte(zp.draw_id) };
   else if (addr === labels.pl_done && plotEntry) {
@@ -284,6 +284,12 @@ while (m.readbyte(labels.intro) !== 1) await m.runFor(20000); // from the first 
 const signedTable = (base) => [...Array((BREATH_MAX + 1) * FORM_COLS)].map((_, k) => (m.readbyte(base + k) << 24) >> 24);
 const breath = signedTable(labels.breath);
 const vbreath = signedTable(labels.vbreath);
+const slotPx = [...Array(FORM_ROWS * FORM_COLS)].map((_, k) => m.readbyte(labels.slot_px + k));
+// each row's outer columns at the start of a wave
+const rowEnds = [...Array(FORM_ROWS)].map((_, r) => {
+  const cols = [...Array(FORM_COLS).keys()].filter((c) => m.readbyte(labels.slot_start + r * FORM_COLS + c));
+  return [cols[0], cols.at(-1)];
+});
 const levelTable = (name) => [...Array(LEVELS)].map((_, k) => m.readbyte(labels[name] + k));
 const burstMins = levelTable("burst_mins");
 const afireTops = levelTable("afire_tops"), afireRanges = levelTable("afire_ranges");
@@ -302,12 +308,12 @@ const templates = ["player", "bullet", "abullet", "bonus", "expl", "flagship", "
   w: art[name][0].length,
 }));
 const isAlien = (s) => /^(flagship|escort|drone|boss)/.test(s.name);
-// Where formation slot i sits: its row's sway plus its column's breathing offset. The
+// Where formation slot i sits: its row's sway, its place in the row and its column's breathing offset. The
 // boss: the middle of row 0, where breathing moves nothing, a row step up.
 const slotX = (ram, i) => {
   if (i === BOSS_SLOT) return ram.rowX[0] + BOSS_DX;
   const r = Math.floor(i / FORM_COLS), c = i % FORM_COLS;
-  return ram.rowX[r] + c * COL_STEP + breath[ram.rowBofs[r] + c];
+  return ram.rowX[r] + slotPx[i] + breath[ram.rowBofs[r] + c];
 };
 const slotY = (ram, i) => (i === BOSS_SLOT ? ram.rowY[0] - ROW_STEP : ram.rowY[Math.floor(i / FORM_COLS)]);
 // A sprite's blank pixels may show a star: white, where RAM puts a shown star.
@@ -384,6 +390,7 @@ const tracks = {
 function bcd(b) { return (b >> 4) * 10 + (b & 15); }
 const stageBonus = { paid: [], wrong: [] };
 let introScore = null;
+const turnSteps = { calm: {}, rush: {} };
 const bonusEv = { otherDrops: 0, catches: 0, doubleShots: 0, secondWithoutPower: 0, lostWithoutHit: 0, stageResets: 0, keptIntoStage: 0 };
 const rapidEv = { poked: 0, capsuleGrants: 0, wrongGrants: 0, stepDowns: 0, keptIntoStage: 0, thirdShots: 0, thirdWithoutRapid: [] };
 const spawns = [];
@@ -493,6 +500,11 @@ for (let i = 0; i < captured.length; i++) {
     // the wave's last alien refills the formation before the next snapshot: its kill is unseen
     // the boss counts for none: shot, it drops its own capsule
     const bossShot = !newWave && prev.alive[BOSS_SLOT] && !ram.alive[BOSS_SLOT];
+    // steering: the dive's speed toward the player changes 1 a frame, 2 in the rush (0: a new dive or the edge)
+    if (prev.diver_state === 1 && ram.diver_state === 1 && ram.diver_vx) {
+      const d = Math.abs(((ram.diver_vx - prev.diver_vx + 128) & 255) - 128), h = turnSteps[ram.alive_count <= RUSH_COUNT ? "rush" : "calm"];
+      h[d] = (h[d] ?? 0) + 1;
+    }
     if (!prev.bonus_on && ram.bonus_on && !bossShot) bonusEv.otherDrops++;
     if (!prev.intro && ram.intro) introScore = ram.score;
     if (prev.intro && !ram.intro && introScore != null) {
@@ -502,8 +514,8 @@ for (let i = 0; i < captured.length; i++) {
     if (!prev.power && ram.power) bonusEv.catches++;
     if (prev.power && !ram.power && ram.player_state !== 1) ram.intro ? bonusEv.stageResets++ : bonusEv.lostWithoutHit++;
     if (prev.intro && !ram.intro && ram.power) bonusEv.keptIntoStage++;
-    if (ram.bullets[1].on && !prev.bullets[1].on) prev.power ? bonusEv.doubleShots++ : bonusEv.secondWithoutPower++;
     // fired this frame: the power it fired with is now's (it may have just been granted)
+    if (ram.bullets[1].on && !prev.bullets[1].on) ram.power ? bonusEv.doubleShots++ : bonusEv.secondWithoutPower++;
     if (ram.bullets[2].on && !prev.bullets[2].on) ram.power >= 2 ? rapidEv.thirdShots++ : rapidEv.thirdWithoutRapid.push([i, prev.power, ram.power]);
     // rapid fire: a capsule caught with the double shot, kept until a ship is lost
     if (prev.power < 2 && ram.power === 2) {
@@ -703,7 +715,7 @@ const report = {
   formation_gaps: merge(tracks.slots.map((t) => cadence(t.map((p) => (p ? `${p.x},${p.y}` : null))))),
   // outer alien to outer alien, both on screen: bottom row across, top row to bottom row
   // each row's outer slots: divers and kills hide them, so any full row will do
-  formation_widths: [...Array(FORM_ROWS)].map((_, r) => span(tracks.slots[r * FORM_COLS], tracks.slots[(r + 1) * FORM_COLS - 1], "x")),
+  formation_widths: rowEnds.map(([a, b], r) => span(tracks.slots[r * FORM_COLS + a], tracks.slots[r * FORM_COLS + b], "x")),
   // each row's lowest to highest y: the outer rows travel furthest
   formation_row_travel: [...Array(FORM_ROWS)].map((_, r) => {
     const ys = tracks.slots.slice(r * FORM_COLS, (r + 1) * FORM_COLS).flat().filter(Boolean).map((p) => p.y);
@@ -736,6 +748,9 @@ const report = {
     else acc.push({ level, n: 1 });
     return acc;
   }, []).reduce((h, b) => ((h[b.level] ??= {}), (h[b.level][b.n] = (h[b.level][b.n] ?? 0) + 1), h), {}),
+  // a burst BURST_PAUSE frames after the last: the rush's next burst
+  rebursts: burstSteps.filter((b, k) => k && b.frame - burstSteps[k - 1].frame === BURST_PAUSE).map((b) => b.rush),
+  turn_steps: turnSteps,
   // frames from the dive timer starting to the launch; rush: from the count reaching RUSH_COUNT
   dive_gaps: idles.reduce((h, d) => ((h[d.level] ??= {}), (h[d.level][d.rush == null ? d.gap : `rush ${d.rush}`] = (h[d.level][d.rush == null ? d.gap : `rush ${d.rush}`] ?? 0) + 1), h), {}),
   shooter_rows: [...shooterRows].sort(),
@@ -767,7 +782,10 @@ const checks = {
   "player moves 1px per frame": only(report.player_steps, (d) => Math.abs(d) <= 1),
   "formation aliens move at most 1px per step": [report.formation_x_steps, report.formation_y_steps].every((h) => only(h, (d) => Math.abs(d) <= 1)),
   "formation aliens move only on their row's frame": only(report.formation_gaps, (g) => g % 4 === 0),
-  "formation breathes in and out fully": report.formation_widths.some((w) => w[1] - w[0] === 2 * BREATH_MAX),
+  "formation breathes in and out fully": report.formation_widths.some((w, r) => {
+    const [a, b] = rowEnds[r], full = breath[BREATH_MAX * FORM_COLS + b] - breath[BREATH_MAX * FORM_COLS + a];
+    return w[1] - w[0] === full;
+  }),
   "formation breathes up and down fully": (() => {
     // row r moves out vbreath[BREATH_MAX * FORM_COLS + r]: the outer rows most
     const t = report.formation_row_travel;
@@ -792,6 +810,9 @@ const checks = {
     idles.filter((d) => d.rush == null).every((d) => d.gap >= d.delay - 1 && d.gap <= d.delay + 3),
   "the last few aliens rush": idles.some((d) => d.rush != null) &&
     idles.filter((d) => d.rush != null).every((d) => d.rush <= RUSH_DELAY + 2),
+  "in the rush, swooping aliens fire again after a pause": report.rebursts.length > 0 && report.rebursts.every(Boolean),
+  "in the rush, swooping aliens turn twice as hard": only(report.turn_steps.calm, (d) => d <= 1) &&
+    only(report.turn_steps.rush, (d) => d <= 2) && report.turn_steps.rush[2] > 0,
   "WAVE banner shows": report.banner_frames >= BANNER_TIME,
   "rows drop in from the top 1px per frame": only(report.drop_steps, (d) => d === 1) && report.drop_steps[1] > 0 &&
     report.drop_first_y.length === 1 && report.drop_first_y[0] === DROP_Y && report.drop_unseen.length === 0,

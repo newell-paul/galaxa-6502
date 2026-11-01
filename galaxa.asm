@@ -119,11 +119,13 @@ TT_FLASH     = 136
 TT_GREEN     = 146              ; graphics: the stage squares are sixels
 ASSERT PLAYER_MAX_X + ALIEN_W <= 160
 
-FORM_COLS    = 6
+FORM_COLS    = 7
 FORM_ROWS    = 4
 FORM_COUNT   = FORM_COLS * FORM_ROWS
-FORM_INSET   = "2100"         ; empty columns at each end, per row
-WAVE_COUNT   = FORM_COUNT - 2 * (VAL(MID$(FORM_INSET, 1, 1)) + VAL(MID$(FORM_INSET, 2, 1)) + VAL(MID$(FORM_INSET, 3, 1)) + VAL(MID$(FORM_INSET, 4, 1)))
+FORM_SHAPE   = "0011100" + "0110110" + "0111110" + "1111111"   ; top down: 3, 4, 5, 7 under the boss
+FORM_PULL    = "0800"         ; px each side moves in, per row: the 4 sit between the columns
+WAVE_COUNT   = 3 + 4 + 5 + 7  ; the 1s in FORM_SHAPE
+ASSERT FORM_COLS MOD 2 = 1    ; the middle column under the boss; uf_col's walk
 FORM_Y       = 32
 COL_STEP     = ALIEN_W + 5
 ROW_STEP     = ALIEN_H + 5
@@ -132,7 +134,7 @@ VBREATH_MAX  = 3
 FX_START     = 40
 BOSS_SLOT    = FORM_COUNT
 FORM_SLOTS   = FORM_COUNT + 1
-BOSS_DX      = (FORM_COLS - 1) * COL_STEP DIV 2   ; the middle, where breathing is 0
+BOSS_DX      = FORM_COLS DIV 2 * COL_STEP      ; over the middle column, where breathing is 0
 FLANK        = ALIEN_W + 1
 FX_MIN       = 4 + BREATH_MAX
 FX_MAX       = PLAYER_MAX_X - (FORM_COLS - 1) * COL_STEP - BREATH_MAX
@@ -140,7 +142,7 @@ ASSERT FX_MIN < FX_START AND FX_START < FX_MAX    ; or the sway never turns
 
 LEVELS       = 8
 DIVE_LAST    = 11             ; the last level's dive gap, a frame less each wave after it
-RUSH_COUNT   = 6
+RUSH_COUNT   = 10             ; this few left: dives come fast, fire again and turn harder
 RUSH_DELAY   = 8
 DIVE_STRIDE  = 7              ; coprime with 25: visits every slot
 DIVER_SPEED  = 3
@@ -173,6 +175,7 @@ ABULLETS     = 3
 ABULLET_SPEED = 4
 ABULLET_BOTTOM = 256 - 4
 BURST_GAP    = 6
+BURST_PAUSE  = 2 * BURST_GAP  ; the rush: before the next burst
 AFIRE_LOW    = PLAYER_Y - 24
 GLYPHS       = 15
 GLYPH_PLUS   = 14
@@ -699,9 +702,9 @@ GUARD &0DF0
     JSR plot_delta
 .uf_next
     LDX loop_i : INX : INX : STX loop_i
-    LDA slot_col,X : LSR A : BNE uf_col_loop    ; even columns 0, 2, 4 then odd 1, 3, 5: same x AND 1
-    BCS uf_ret                                  ; after column 5: slot_col + 6 * r + 7 is 1
-    TXA : SBC #4 : STA loop_i : BPL uf_col_loop
+    LDA slot_col,X : LSR A : BNE uf_col_loop    ; even columns 0, 2, 4, 6 then odd 1, 3, 5: same x AND 1
+    BCC uf_ret                                  ; after column 5: the next row's column 0
+    TXA : SBC #FORM_COLS : STA loop_i : BPL uf_col_loop     ; after column 6: column 1, carry set
 .uf_ret
     RTS
 
@@ -1368,19 +1371,24 @@ ASSERT ABULLETS = 3 AND BULLETS = 3 AND ORDER_N = 8   ; update_abullet: AND #3, 
     LDA diver_slot : CMP #BOSS_SLOT : BEQ af_wings  ; the boss never fires: af_queue sends its guards to af_guard
     LDA burst_left : BNE af_burst
     LDA afire_armed : BEQ af_done
+    DEC burst_gap : BNE af_done     ; the rush's pause; 1 for a dive's first burst
+    INC burst_gap                   ; 1: the burst fires as it opens
     LDX level
     LDA diver_y : CMP afire_tops,X : BCC af_done
     LDA diver_x : JSR af_range : BCC af_done
     LDA #0 : STA afire_armed
     JSR random : AND #1 : CLC : ADC burst_mins,X : STA burst_left
-    LDA #1 : STA burst_gap
 .af_burst
     DEC burst_gap : BNE af_done
     LDA #BURST_GAP : STA burst_gap
     LDA diver_y : CLC : ADC #ALIEN_H
     CMP #AFIRE_LOW + 1 : BCS af_end
 .af_shot
-    DEC burst_left
+    DEC burst_left : BNE af_lead
+    LDA alive_count : CMP #RUSH_COUNT + 1 : BCS af_lead
+    INC afire_armed                 ; the rush: another burst, after a pause
+    LDA #BURST_PAUSE : STA burst_gap
+.af_lead
     LDX lead_gone : BNE af_wings
     LDX diver_x : JSR af_queue
 .af_wings
@@ -1396,23 +1404,6 @@ ASSERT ABULLETS = 3 AND BULLETS = 3 AND ORDER_N = 8   ; update_abullet: AND #3, 
     DEY : BPL af_wing
 .af_done
     RTS
-.af_range                           ; A = x, X = level: carry set if near the player
-    SEC : SBC player_x : SEC : SBC #(6 - ALIEN_MID) AND &FF  ; middles: x + ALIEN_MID and x + 6
-    CLC : ADC afire_ranges,X : STA tmp
-    LDA afire_ranges,X : ASL A
-    CMP tmp
-    RTS
-.af_queue                           ; A = shot's top row, X = alien's x
-    PHA
-    LDA diver_slot : CMP #BOSS_SLOT : BNE af_q
-    JMP af_guard                    ; Y = the guard
-.af_q
-    TXA : LDX fire_n
-    CLC : ADC #ALIEN_MID : STA fire_x,X
-    PLA : STA fire_y,X
-    INC fire_n
-    RTS
-
 .update_abullet                     ; Y = order entry 5-7 (from ubo_run): bullet Y - 5
     TYA : AND #3 : TAX : DEX
     STX abullet_idx
@@ -1573,7 +1564,7 @@ ASSERT ABULLETS = 3 AND BULLETS = 3 AND ORDER_N = 8   ; update_abullet: AND #3, 
 .uf_guard_h                         ; A = height - 1
     CLC : ADC draw_y : TAX
     JSR beam_guard
-    LDA form_row : ASL A : ADC form_row : ASL A : STA loop_i
+    LDA form_row : ASL A : ASL A : ASL A : SEC : SBC form_row : STA loop_i    ; * 7
     RTS
 
 ; --- Diver ---
@@ -1637,7 +1628,7 @@ ASSERT ABULLETS = 3 AND BULLETS = 3 AND ORDER_N = 8   ; update_abullet: AND #3, 
     STY tmp2 : LDY tmp
     LDA alive,Y : LDY tmp2
     CMP #ALIVE_HOME : BEQ ud_guard_ok
-    INY : INY : CPY #FORM_COUNT : BCC ud_guard
+    INY : INY : CPY #GUARD_N : BCC ud_guard
     BCS ud_side_next
 .ud_guard_ok
     LDA tmp : STA wing_slot,X
@@ -1676,6 +1667,7 @@ ASSERT ABULLETS = 3 AND BULLETS = 3 AND ORDER_N = 8   ; update_abullet: AND #3, 
     STY diver_left
     LDA #DIVER_DIVE : STA diver_state
     STA afire_armed                 ; A = DIVER_DIVE
+    STA burst_gap                   ; the first burst opens with no pause
     CPX #BOSS_SLOT : BNE ud_active
     RTS                             ; the boss waits: a guard's row may have just stepped
 
@@ -1713,13 +1705,19 @@ ASSERT ABULLETS = 3 AND BULLETS = 3 AND ORDER_N = 8   ; update_abullet: AND #3, 
     INC diver_wrap                  ; leave it drawn where it is; diver_reenter moves it
     RTS
 .ud_steer                           ; overshoot gives the weave
+    LDY #1
+    LDA alive_count : CMP #RUSH_COUNT + 1 : BCS ud_turn
+    INY                             ; the rush: turns twice as hard
+.ud_turn
     LDA player_x : CMP new_x : BEQ ud_glide : BCC ud_pull_left
     LDA diver_vx : CMP #DIVE_VMAX : BEQ ud_glide
     INC diver_vx
-    JMP ud_glide
+    JMP ud_turned
 .ud_pull_left
     LDA diver_vx : CMP #256 - DIVE_VMAX : BEQ ud_glide
     DEC diver_vx
+.ud_turned
+    DEY : BNE ud_turn
 .ud_glide
     LDA diver_xf : CLC : ADC diver_vx       ; -24..39
     TAY : AND #15 : STA diver_xf
@@ -1926,10 +1924,11 @@ ASSERT ABULLETS = 3 AND BULLETS = 3 AND ORDER_N = 8   ; update_abullet: AND #3, 
     INC queue_n
     RTS
 
-.flush_plots
-    LDX queue_n : BEQ fp_done
+.flush_plots                        ; in queue order: the deferred go top first, erase before draw
+    LDX #0
 .fp_plot
-    DEX : STX queue_n
+    CPX queue_n : BEQ fp_done
+    STX order_idx                   ; free now: holds the index across the plot
     LDA queue_x,X : STA draw_x
     LDA queue_y,X : STA draw_y
     LDA queue_id,X : BMI fp_delta
@@ -1940,8 +1939,9 @@ ASSERT ABULLETS = 3 AND BULLETS = 3 AND ORDER_N = 8   ; update_abullet: AND #3, 
     AND #&7F : STA draw_id
     JSR plot_delta
 .fp_next
-    LDX queue_n : BNE fp_plot
+    LDX order_idx : INX : BNE fp_plot
 .fp_done
+    LDA #0 : STA queue_n
     RTS
 
 ; Column-major so one X index walks every column; column addresses are patched in.
@@ -2082,6 +2082,23 @@ NEXT
     SBC #0 : STA level              ; carry clear: - 1
     RTS
 
+.af_range                           ; A = x, X = level: carry set if near the player
+    SEC : SBC player_x : SEC : SBC #(6 - ALIEN_MID) AND &FF  ; middles: x + ALIEN_MID and x + 6
+    CLC : ADC afire_ranges,X : STA tmp
+    LDA afire_ranges,X : ASL A
+    CMP tmp
+    RTS
+.af_queue                           ; A = shot's top row, X = alien's x
+    PHA
+    LDA diver_slot : CMP #BOSS_SLOT : BNE af_q
+    JMP af_guard                    ; Y = the guard
+.af_q
+    TXA : LDX fire_n
+    CLC : ADC #ALIEN_MID : STA fire_x,X
+    PLA : STA fire_y,X
+    INC fire_n
+    RTS
+
 ; --- Keyboard, score and text ---
 
 ; Z wins if both directions are held
@@ -2211,8 +2228,11 @@ FOR r, 0, 31 : EQUB LO(SCREEN + r * 640) : NEXT
 .crow_hi
 FOR r, 0, 31 : EQUB HI(SCREEN + r * 640) : NEXT
 
-.slot_px
-FOR i, 0, FORM_COUNT - 1 : EQUB (i MOD FORM_COLS) * COL_STEP : NEXT
+.slot_px                            ; TRUE is -1
+FOR i, 0, FORM_COUNT - 1
+    c = i MOD FORM_COLS : pull = VAL(MID$(FORM_PULL, i DIV FORM_COLS + 1, 1))
+    EQUB c * COL_STEP - pull * (c < FORM_COLS DIV 2) + pull * (c > FORM_COLS DIV 2)
+NEXT
 .slot_row
 FOR i, 0, FORM_COUNT - 1 : EQUB i DIV FORM_COLS : NEXT
     EQUB 0                          ; the boss: it moves with row 0
@@ -2224,10 +2244,7 @@ FOR j, 0, NUM_STARS - 1 : i = 3 * (j MOD 10) + j DIV 10 : EQUB (i * 135 + i * i 
 FOR j, 0, NUM_STARS - 1 : i = 3 * (j MOD 10) + j DIV 10 : EQUB STAR_TOP + (i * 189 + i * i * 8) MOD (256 - STAR_TOP) : NEXT
 
 .slot_start
-FOR i, 0, FORM_COUNT - 1
-    inset = VAL(MID$(FORM_INSET, i DIV FORM_COLS + 1, 1))
-    EQUB -((i MOD FORM_COLS >= inset) AND (i MOD FORM_COLS < FORM_COLS - inset)) * ALIVE_HOME
-NEXT
+FOR i, 0, FORM_COUNT - 1 : EQUB VAL(MID$(FORM_SHAPE, i + 1, 1)) * ALIVE_HOME : NEXT
     EQUB ALIVE_HOME
 .slot_col                           ; one extra entry so the last row's walk ends on 0
 FOR i, 0, FORM_COUNT : EQUB i MOD FORM_COLS : NEXT
@@ -2266,10 +2283,11 @@ FOR b, 0, BREATH_MAX
 NEXT
 .row_spr                            ; frame 1 is id + 1
     EQUB SPR_FLAGSHIP, SPR_ESCORT, SPR_DRONE, SPR_DRONE
-.guard_order                        ; nearest first: left at even entries
+.guard_order                        ; nearest first: left at even entries; not the middle column
 FOR r, 0, FORM_ROWS - 1 : FOR c, 0, FORM_COLS DIV 2 - 1
-    EQUB r * FORM_COLS + FORM_COLS DIV 2 - 1 - c, r * FORM_COLS + FORM_COLS DIV 2 + c
+    EQUB r * FORM_COLS + FORM_COLS DIV 2 - 1 - c, r * FORM_COLS + FORM_COLS DIV 2 + 1 + c
 NEXT : NEXT
+GUARD_N = P% - guard_order
 .step_min
     EQUB -DIVE_XMAX AND &FF, -DIVER_SPEED AND &FF
 ; Peel-off half loop; dx is for a loop to the right
@@ -2624,7 +2642,7 @@ GUARD &01C3
     RTS
 .cbh_rowok
     STX tmp2
-    TXA : ASL A : ADC tmp2 : ASL A : TAX
+    TXA : ASL A : ASL A : ASL A : SEC : SBC tmp2 : TAX       ; * 7
 .cbh_col                            ; breathing spaces the columns unevenly: try each
     LDA alive,X : CMP #ALIVE_HOME : BNE cbh_next
     JSR slot_pos

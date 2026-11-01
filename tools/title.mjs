@@ -55,12 +55,12 @@ for (const ch of "GALAXA") {
   }));
   lx += F[ch][0].length * 2 + 2;
 }
-[G.red, G.yellow, G.yellow, G.blue, G.blue].forEach((g, i) => put(2 + i, 0, g));
+[G.blue, G.red, G.red, G.yellow, G.yellow].forEach((g, i) => put(2 + i, 0, g));
 mosaic(logo, 2, 6);
 // and a white star either side of it, a cell clear
 put(2, 0, G.white);
 scr[2][4] = 32 | SIX[1][0];
-scr[2][5] = G.red;
+scr[2][5] = G.blue;
 put(6, 35, G.white);
 scr[6][36] = 32 | SIX[1][1];
 
