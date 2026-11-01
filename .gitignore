@@ -1,4 +1,5 @@
 *.ssd
+!galaxa.ssd
 *.lst
 *.sym
 title.asm

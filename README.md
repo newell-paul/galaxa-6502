@@ -40,6 +40,7 @@ Needs [BeebASM](https://github.com/stardot/beebasm) and Node.js.
 make              # build galaxa.ssd
 make run          # build, then open it in a local jsbeeb
 make run-debug    # debug build: P cycles the power level
+make serve        # the browser page, at http://localhost:8086/
 ```
 
 Or load `galaxa.ssd` in any BBC Micro emulator and press Shift+Break.
@@ -56,6 +57,8 @@ the capsule rules. It expects a jsbeeb checkout at `~/.local/share/jsbeeb` (set
 | File | What it is |
 |------|------------|
 | `galaxa.asm` | The game |
+| `galaxa.ssd` | The built disc, which the browser page boots |
+| `index.html` | The browser page (GitHub Pages) |
 | `tools/title.mjs` | Builds the MODE 7 title screen |
 | `tools/smoothness.mjs` | Frame-by-frame smoothness test |
 | `tools/capsule.mjs` | Capsule and power-up test |

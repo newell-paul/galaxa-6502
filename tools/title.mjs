@@ -11,7 +11,7 @@ const VERSION = fs.readFileSync(path.join(ROOT, "galaxa.asm"), "utf8").match(/^V
 
 const A = { red: 129, green: 130, yellow: 131, blue: 132, magenta: 133, cyan: 134, white: 135 };
 const G = { red: 145, green: 146, yellow: 147, blue: 148, magenta: 149, cyan: 150, white: 151 };
-const FLASH = 136, SEP = 154;
+const FLASH = 136, SEP = 154, CONTIG = 153;
 const HS_ROW = 12, HS_COL = 10, PROMPT_ROW = 22, PROMPT_COL = 14;
 
 const scr = [...Array(25)].map(() => Array(40).fill(32));
@@ -70,8 +70,9 @@ scr[6][36] = 32 | SIX[1][1];
   put(HS_ROW + i, HS_COL + 1, rank, A.blue);
   put(HS_ROW + i, HS_COL + 15, A.yellow, "    0");
 });
-// a star either side of it, white text again before the rank
-put(HS_ROW + 2, 4, G.white, SEP, 32 | SIX[1][1], A.white);
+// a star either side of it, white text again before the rank, and contiguous again for
+// the stage squares
+put(HS_ROW + 2, 4, G.white, SEP, 32 | SIX[1][1], A.white, CONTIG);
 put(HS_ROW + 2, 33, G.white, SEP, 32 | SIX[1][0]);
 
 put(19, 4, A.green, "Z LEFT    X RIGHT    RETURN FIRE");

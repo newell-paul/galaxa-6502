@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Galaxa - BBC Micro (6502 assembly)</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; overflow: hidden; }   /* page never scrolls: keys reach the game, not the scrollbar */
+    body {
+      background: #1a1a2e;
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      height: 100vh;
+      padding: 0.5rem;
+    }
+    h1 {
+      font-size: 1.2rem;
+      font-weight: 600;
+      margin: 0.3rem 0;
+      color: #fff;
+    }
+    .subtitle {
+      font-size: 0.8rem;
+      font-weight: 400;
+      color: #888;
+    }
+    .emulator-container {
+      position: relative;
+      aspect-ratio: 921 / 733;
+      /* Largest size that fits the width AND the height left after the chrome
+         (~150px of heading + instructions), capped at native 921px so it never
+         upscales blurrily. Driving off width uses the full window, not a thin
+         column. Body is overflow:hidden so keys reach the game, not the scrollbar. */
+      width: min(921px, 96vw, (100vh - 100px) * 921 / 733);
+    }
+    .emulator-container iframe {
+      display: block;
+      width: 100%;
+      height: 100%;
+      border: none;
+      border-radius: 4px;
+    }
+    .instructions {
+      max-width: 900px;
+      margin: 0.3rem 0;
+      font-size: 0.85rem;
+      line-height: 1.4;
+      color: #aaa;
+      text-align: center;
+    }
+    .instructions a { color: #777; }
+    .instructions kbd {
+      background: #333;
+      border: 1px solid #555;
+      border-radius: 3px;
+      padding: 0.1em 0.4em;
+      font-family: monospace;
+      font-size: 0.85em;
+      color: #fff;
+    }
+    .instructions p { margin: 0.25rem 0; }
+    #fullscreen-btn {
+      background: #333;
+      border: 1px solid #555;
+      border-radius: 4px;
+      color: #fff;
+      font-size: 0.85rem;
+      padding: 0.25em 0.7em;
+      cursor: pointer;
+    }
+    #fullscreen-btn:hover { background: #444; }
+    /* Fullscreen cropping is applied via inline styles in JS (see applyFsStyles),
+       not CSS :fullscreen rules — inline styles always win and avoid any selector
+       or specificity issues that left the jsbeeb chrome/bezel visible. */
+    .footer {
+      padding: 0.25rem;
+      font-size: 0.75rem;
+      color: #555;
+    }
+    .footer a { color: #777; }
+  </style>
+</head>
+<body>
+  <h1>Galaxa <span class="subtitle">&middot; BBC Micro &middot; Paul Newell &middot; 6502 assembly, 2026</span></h1>
+
+  <div class="emulator-container">
+    <iframe id="emulator" allow="autoplay; fullscreen" allowfullscreen loading="eager"></iframe>
+  </div>
+
+  <div class="instructions">
+    <p>Click the screen, then press any key to start. <kbd>Z</kbd> / <kbd>X</kbd> to move, <kbd>Return</kbd> to fire. Shoot the boss for a P capsule and catch it to power up. <a href="https://github.com/newell-paul/galaxa-6502">Source</a> &middot; <a href="https://github.com/mattgodbolt/jsbeeb">Powered by jsbeeb</a></p>
+    <p><button id="fullscreen-btn" type="button">⛶ Full screen</button> &middot; press <kbd>Esc</kbd> to exit</p>
+  </div>
+
+  <script>
+    const iframe = document.getElementById('emulator');
+    const loc = window.location;
+    const isLocal = loc.hostname === 'localhost' || loc.hostname === '127.0.0.1';
+
+    // Stop game keys (arrows, space) from scrolling the page when focus has not
+    // yet entered the cross-origin emulator iframe. Clicking the screen focuses it.
+    const SCROLL_KEYS = new Set([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+                                 'PageUp', 'PageDown', 'Home', 'End']);
+    window.addEventListener('keydown', (e) => {
+      if (SCROLL_KEYS.has(e.key)) e.preventDefault();
+    }, { passive: false });
+    iframe.addEventListener('mouseenter', () => iframe.focus());
+
+    // Full screen: put the container into fullscreen (works with the cross-origin
+    // iframe), then focus the game so keypresses reach it rather than the page.
+    const container = document.querySelector('.emulator-container');
+    document.getElementById('fullscreen-btn').addEventListener('click', () => {
+      const req = container.requestFullscreen || container.webkitRequestFullscreen;
+      if (req) Promise.resolve(req.call(container)).then(() => iframe.focus()).catch(() => {});
+    });
+
+    // The jsbeeb chrome (top bar, LED panel, CRT bezel) is rendered INSIDE the
+    // cross-origin iframe, so CSS can't hide it. Instead, on entering fullscreen we
+    // oversize the iframe and clip it: the live BBC screen fills ~70% of the iframe,
+    // so sizing it to 70vh then scaling 1/0.70 lands the screen at exactly 100vh,
+    // pushing chrome and bezel outside the clipped container. Applied as inline
+    // styles (always win) and removed on exit so normal layout is restored.
+    // The live BBC screen fills the central ~70% of the iframe, so to make the
+    // screen fill the viewport we size the iframe to 1/0.70 = ~143% of the viewport
+    // height; the surrounding chrome/bezel then overflows the centred, clipping
+    // container. Pure sizing, no transform (transforms on aspect-ratio iframes were
+    // being ignored). The iframe's 921:733 ratio sets its width from that height.
+    const CROP = 0.70;
+    const OVER = (100 / CROP).toFixed(2);   // ~142.86
+    function applyFsStyles() {
+      const fs = document.fullscreenElement === container ||
+                 document.webkitFullscreenElement === container;
+      if (fs) {
+        Object.assign(container.style, {
+          width: '100vw', height: '100vh', aspectRatio: 'auto', display: 'flex',
+          alignItems: 'center', justifyContent: 'center', background: '#000',
+          overflow: 'hidden',
+        });
+        Object.assign(iframe.style, {
+          height: OVER + 'vh',
+          width: 'calc(' + OVER + 'vh * 921 / 733)',
+          maxWidth: 'none', maxHeight: 'none', aspectRatio: 'auto',
+          borderRadius: '0', transform: 'none', flex: '0 0 auto',
+        });
+        iframe.focus();
+      } else {
+        container.removeAttribute('style');
+        iframe.removeAttribute('style');
+      }
+    }
+    document.addEventListener('fullscreenchange', applyFsStyles);
+    document.addEventListener('webkitfullscreenchange', applyFsStyles);
+
+    const DISC = 'galaxa.ssd';
+
+    function bootDisc(discParam) {
+      iframe.src = `https://bbc.xania.org/?disc=${discParam}&autoboot&embed`;
+    }
+
+    if (isLocal) {
+      // HTTPS jsbeeb cannot fetch from HTTP localhost, and the disc is too big to inline as
+      // base64 (the URL gets a 414), so `make serve` links it into a local jsbeeb.
+      iframe.src = `http://localhost:5173/?disc=${DISC}&autoboot&embed`;
+    } else {
+      // GitHub Pages (or any HTTPS host): the .ssd sits alongside this page.
+      // jsbeeb wants the disc URL raw (unencoded), as in its own examples.
+      bootDisc(new URL(DISC, loc.href).href);
+    }
+  </script>
+</body>
+</html>
