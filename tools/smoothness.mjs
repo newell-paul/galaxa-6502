@@ -16,7 +16,7 @@
 //   - that each wave dives more often and fires more, and the last few aliens rush
 //   - that the stars show where RAM says, scroll and twinkle, and never mark a sprite
 //   - the stage bonus: reaching stage N > 1 scores N x 500, ticked in under its banner
-//   - the bonus capsule: only the boss drops it, it falls 1.5px per frame, and catching it
+//   - the bonus capsule: only the boss drops it, no lower than BONUS_LOW, it falls 1.5px per frame, and catching it
 //     gives the double shot, then rapid fire, until a ship is lost, across stages
 //     (tools/capsule.mjs: each case, and the 100 points every hit scores)
 //   - the WAVE banner, and the rows dropping in from the top 1px per frame
@@ -62,6 +62,7 @@ const PLAYER_START = num("PLAYER_START");
 const ALIEN_W = num("ALIEN_W");
 const ALIEN_H = num("ALIEN_H");
 const DIVER_TOP = num("DIVER_TOP");
+const BONUS_LOW = num("BONUS_LOW");
 const ALIEN_MID = num("ALIEN_MID");
 const FORM_ROWS = num("FORM_ROWS");
 const FORM_COLS = num("FORM_COLS");
@@ -404,7 +405,7 @@ const droppedAt = [];
 let bannerFrames = 0;
 const drops = [...Array(BOSS_SLOT + 1)].map(() => []);
 // the boss: its flashing colours seen, its dives with both guards, its kills and drops
-const bossEv = { colours: new Set(), pulseSeen: new Set(), dives: 0, guardedFrames: 0, kills: 0, drops: 0, killsUndropped: 0, backAfterKill: 0,
+const bossEv = { colours: new Set(), pulseSeen: new Set(), dives: 0, guardedFrames: 0, kills: 0, drops: 0, killsUndropped: 0, backAfterKill: 0, dropYs: [],
   shots: 0, guardShots: {}, overShots: [] };
 // enemy bullets fired in a boss dive: the guard that fired each (or -1), checked against
 // the boss and the other guard while they fly (a shot leaves its own guard over a few frames)
@@ -514,9 +515,11 @@ for (let i = 0; i < captured.length; i++) {
     if (!prev.power && ram.power) bonusEv.catches++;
     if (prev.power && !ram.power && ram.player_state !== 1) ram.intro ? bonusEv.stageResets++ : bonusEv.lostWithoutHit++;
     if (prev.intro && !ram.intro && ram.power) bonusEv.keptIntoStage++;
-    // fired this frame: the power it fired with is now's (it may have just been granted)
-    if (ram.bullets[1].on && !prev.bullets[1].on) ram.power ? bonusEv.doubleShots++ : bonusEv.secondWithoutPower++;
-    if (ram.bullets[2].on && !prev.bullets[2].on) ram.power >= 2 ? rapidEv.thirdShots++ : rapidEv.thirdWithoutRapid.push([i, prev.power, ram.power]);
+    // fired this frame: the power it fired with is now's (it may have just been granted),
+    // unless the ship was hit this frame, after the shot
+    const firedPower = ram.player_state === 1 && prev.player_state !== 1 ? prev.power : ram.power;
+    if (ram.bullets[1].on && !prev.bullets[1].on) firedPower ? bonusEv.doubleShots++ : bonusEv.secondWithoutPower++;
+    if (ram.bullets[2].on && !prev.bullets[2].on) firedPower >= 2 ? rapidEv.thirdShots++ : rapidEv.thirdWithoutRapid.push([i, prev.power, ram.power]);
     // rapid fire: a capsule caught with the double shot, kept until a ship is lost
     if (prev.power < 2 && ram.power === 2) {
       if (rapidPoke != null && i >= rapidPoke && prev.power === 1 && !rapidEv.poked) rapidEv.poked++;
@@ -588,7 +591,7 @@ for (let i = 0; i < captured.length; i++) {
   // gone until the wave refills
   if (prev && !newWave && prev.alive[BOSS_SLOT] && !ram.alive[BOSS_SLOT]) {
     bossEv.kills++, bossDead = true;
-    if (!prev.bonus_on && ram.bonus_on) bossEv.drops++;
+    if (!prev.bonus_on && ram.bonus_on) bossEv.drops++, bossEv.dropYs.push(ram.bonus_y);
     else if (!prev.bonus_on) bossEv.killsUndropped++;
   }
   if (newWave) bossDead = false;
@@ -842,6 +845,7 @@ const checks = {
     only(report.boss.x_steps, (d) => Math.abs(d) <= 2) && only(report.boss.y_steps, (d) => Math.abs(d) <= DIVER_SPEED || d < -100) &&
     only(report.boss.gaps, (g) => g <= 2) && report.boss.guard_slow_at.length === 0,
   "a shot boss drops the capsule and stays gone for the wave": report.boss.kills > 0 && report.boss.drops > 0 &&
+    report.boss.dropYs.every((y) => y >= DIVER_TOP && y <= BONUS_LOW) &&
     report.boss.killsUndropped === 0 && report.boss.backAfterKill === 0,
   "the boss never fires; each guard fires at most once a dive, never over the boss or the other guard":
     report.boss.dives > 0 && report.boss.shots === 0 && Object.keys(report.boss.guardShots).length > 0 &&

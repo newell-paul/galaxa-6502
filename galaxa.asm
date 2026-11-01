@@ -165,6 +165,7 @@ BULLET_TOP   = 8
 BONUS_W      = 7
 BONUS_BOTTOM = 256 - ALIEN_H
 BONUS_LIFT   = 24
+BONUS_LOW    = 150            ; the lowest it starts: a second or more to fall to the ship
 SPR_BONUS    = 11             ; delta id 11 is a cross delta of the same height
 SPR_BOSS     = 12
 SPR_EXPL    = 13             ; delta id 13 is a cross delta of the same height
@@ -1374,6 +1375,7 @@ ASSERT ABULLETS = 3 AND BULLETS = 3 AND ORDER_N = 8   ; update_abullet: AND #3, 
     DEC burst_gap : BNE af_done     ; the rush's pause; 1 for a dive's first burst
     INC burst_gap                   ; 1: the burst fires as it opens
     LDX level
+    LDA diver_t : CMP #LOOP_LEN : BCC af_done   ; still looping out of the formation
     LDA diver_y : CMP afire_tops,X : BCC af_done
     LDA diver_x : JSR af_range : BCC af_done
     LDA #0 : STA afire_armed
@@ -2570,7 +2572,10 @@ GUARD &0800
     LDA alive_count : BEQ bn_ret    ; the wave's last alien: the stage ends
     LDA #2 : STA bonus_on
     LDA bullet_x : SBC #(BONUS_W - 1) DIV 2 : AND #&FE : STA bonus_x   ; C set by the CPX; even: one image
-    LDA hit_y : CMP #DIVER_TOP + BONUS_LIFT : BCS bn_lift
+    LDA hit_y : CMP #BONUS_LOW + BONUS_LIFT : BCC bn_high
+    LDA #BONUS_LOW + BONUS_LIFT : BCS bn_lift   ; shot low: it pops up clear of the ship
+.bn_high
+    CMP #DIVER_TOP + BONUS_LIFT : BCS bn_lift
     LDA #DIVER_TOP + BONUS_LIFT + 1 ; carry clear: SBC takes 1 more
 .bn_lift
     SBC #BONUS_LIFT : STA bonus_y
