@@ -1,6 +1,6 @@
 // Targeted test for the capsule: the boss drops a P at every power level. Caught, it gives
 // the double shot, then rapid fire, kept across stages. Every hit stops the bullet, scores
-// 100 and chimes, and the P falls on.
+// and chimes, and the P falls on. Also checks the other scores.
 //
 // Each scenario boots galaxa.ssd in jsbeeb, keeps the aliens home (no dives, so no enemy fire),
 // sets the power level and, at the top of a main loop, plants the ship's bullet just under the
@@ -35,7 +35,7 @@ const num = (name) => {
 const BOSS_SLOT = num("BOSS_SLOT"), BULLET_SPEED = num("BULLET_SPEED"), WING_COLOUR = num("WING_COLOUR");
 const BULLETS = num("BULLETS");
 const DIVE_STRIDE = num("DIVE_STRIDE"), FORM_COLS = num("FORM_COLS"), LAP_ROW = num("LAP_ROW"), LINE_SLOT = LAP_ROW * FORM_COLS + 3, BOTTOM_ROW = (LAP_ROW + 1) * FORM_COLS;
-const FORM_SLOTS = num("FORM_SLOTS"), ALIEN_POINTS = 50, LINE_BONUS = 500;
+const FORM_SLOTS = num("FORM_SLOTS"), SFX_POWER = num("SFX_POWER"), PS_OVER = num("PS_OVER"), ALIVE_HOME = num("ALIVE_HOME");
 const SND_SHOT = num("SND_SHOT");
 const WING = [6, 3, 1]; // cyan, yellow, red
 
@@ -65,13 +65,16 @@ async function boot() {
 }
 
 // power: the level when the boss is shot; shots: bullets planted under the capsule, one at a
-// time; last: the boss is the wave's last alien; volley: just hold fire; line: shoot this many of a line
-async function scenario({ power, shots = 0, last = false, volley = false, line = 0, spread = false }) {
+// time; last: the boss is the wave's last alien; volley: just hold fire; line: shoot this many of a line;
+// slot: the alien that leads it; spare: slots gone first; form: shoot this slot at home;
+// carry: clear the stage after the first capsule, then shoot the next one; newGame: lose the game
+// with the capsule's points at their top
+async function scenario({ power, shots = 0, last = false, volley = false, line = 0, spread = false, slot = null, spare = [], form = null, carry = false, newGame = false }) {
   const m = await boot();
   const rb = (a) => m.readbyte(a), wb = (a, v) => m.writebyte(a, v);
   const keys = { Z: utils.keyCodes.Z, X: utils.keyCodes.X, FIRE: utils.keyCodes.ENTER };
-  const out = { dropped: null, hits: [], power: null, wing: null, inFlight: 0, lineScore: null, lineSize: 0, timeout: false };
-  let phase = "wait", wave = null, frames = 0, done = false, wing = null, look = 0, planted = 0, held = null, before = null, firing = 0, base = 0, shot = 0;
+  const out = { dropped: null, hits: [], power: null, wing: null, inFlight: 0, lineScore: null, lineSize: 0, jingle: false, formScore: null, capsule: null, timeout: false };
+  let phase = "wait", wave = null, frames = 0, done = false, wing = null, look = 0, planted = 0, held = null, before = null, firing = 0, base = 0, shot = 0, carried = false, typed = false;
   const bcd = (b) => (b >> 4) * 10 + (b & 15);
   const score = () => (bcd(rb(labels.score_hi)) * 100 + bcd(rb(labels.score_lo))) * 10;
   const hold = (k) => {
@@ -84,12 +87,30 @@ async function scenario({ power, shots = 0, last = false, volley = false, line =
   const hook = m.processor.debugInstruction.add((addr) => {
     // the palette timer 1 left for the ship's rows last frame (the ULA stores colours inverted)
     if (addr === labels.split_start) wing = m.video.actualPal[WING_COLOUR] ^ 7;
+    if (addr === labels.play_sfx && rb(zp.sfx) & SFX_POWER) out.jingle = true;
     if (addr !== labels.main_loop || done) return false;
-    if (rb(labels.lives) < 2) wb(labels.lives, 3);
+    if (phase !== "over" && rb(labels.lives) < 2) wb(labels.lives, 3);
     if (!line) wb(zp.dive_timer, 100); // the aliens stay home
     if (++frames > 3000) return (out.timeout = done = true), false;
-    if (phase === "wait") {
+    if (phase === "over") {
+      if (rb(labels.lives) === 3) return (out.capsule = rb(labels.capsule_pts)), (out.power = rb(zp.power)), (phase = "look"), false;
+    } else if (phase === "wait") {
       if (!rb(labels.intro) && !rb(labels.player_state) && !rb(labels.bullets_on)) {
+        if (newGame) {
+          wb(labels.capsule_pts, 8), wb(labels.lives, 0), wb(labels.player_state, PS_OVER);
+          return (phase = "over"), false;
+        }
+        for (const s of spare) wb(labels.alive + s, 0), wb(zp.alive_count, rb(zp.alive_count) - 1);
+        if (form === BOSS_SLOT) {
+          plant(rb(zp.boss_x) + 2, rb(zp.boss_y) + BULLET_SPEED);
+          return (base = score()), (phase = "form"), false;
+        }
+        if (form !== null) {
+          const row = rb(labels.slot_row + form), col = rb(labels.slot_col + form);
+          const x = rb(labels.row_x + row) + rb(labels.slot_px + form) + ((rb(labels.breath + rb(labels.row_bofs + row) + col) << 24) >> 24);
+          plant((x + 2) & 255, rb(labels.row_y + row) + BULLET_SPEED);
+          return (base = score()), (phase = "form"), false;
+        }
         if (last || volley) {
           for (let i = 0; i < BOSS_SLOT; i++) wb(labels.alive + i, 0);
           wb(zp.alive_count, 1);
@@ -100,7 +121,7 @@ async function scenario({ power, shots = 0, last = false, volley = false, line =
         }
         wb(zp.power, power), (wave = rb(labels.wave));
         if (line) {
-          wb(zp.diver_pick, ((spread ? BOTTOM_ROW : LINE_SLOT) - DIVE_STRIDE + FORM_SLOTS) % FORM_SLOTS);
+          wb(zp.diver_pick, ((slot ?? (spread ? BOTTOM_ROW : LINE_SLOT)) - DIVE_STRIDE + FORM_SLOTS) % FORM_SLOTS);
           wb(zp.dive_timer, 1);
           return (base = score()), (phase = "line"), false;
         }
@@ -109,6 +130,10 @@ async function scenario({ power, shots = 0, last = false, volley = false, line =
         plant(rb(zp.boss_x) + 2, rb(zp.boss_y) + BULLET_SPEED);
         phase = "boss";
       }
+    } else if (phase === "form") {
+      if (!rb(labels.alive + form)) return (out.formScore = score() - base), (out.power = rb(zp.power)), (phase = "look"), false;
+    } else if (phase === "stage") {
+      if (rb(labels.wave) !== wave) phase = "wait";
     } else if (phase === "boss") {
       // the wave's last alien: the next wave's first main loop, its intro over
       if (last) return rb(labels.wave) !== wave && ((out.power = rb(zp.power)), (phase = "look")), false;
@@ -117,6 +142,15 @@ async function scenario({ power, shots = 0, last = false, volley = false, line =
       phase = rb(zp.bonus_on) ? "fall" : "settle";
     } else if (phase === "fall") {
       const on = rb(zp.bonus_on), bx = rb(zp.bonus_x), by = rb(zp.bonus_y);
+      if (!on && carry && !carried) {
+        carried = true;
+        hold(null);
+        for (let i = 0; i < BOSS_SLOT; i++) wb(labels.alive + i, 0);
+        wb(labels.alive + BOSS_SLOT, ALIVE_HOME), wb(zp.alive_count, 1);
+        wave = rb(labels.wave);
+        plant(rb(zp.boss_x) + 2, rb(zp.boss_y) + BULLET_SPEED);
+        return (phase = "stage"), false;
+      }
       if (!on) return hold(null), (out.power = rb(zp.power)), (phase = "look"), false;
       // a planted bullet gone: what the hit scored, sounded and left
       if (before && !rb(labels.bullets_on)) {
@@ -124,13 +158,13 @@ async function scenario({ power, shots = 0, last = false, volley = false, line =
         out.hits.push({ points: score() - before.score, sound: t === 0 || t === 4 ? "chime" : t });
         before = null;
       }
-      if (planted < shots && on !== 2 && !before && by < 150)
+      if (planted < shots && on !== 2 && !before && by < 150 && !(carry && !carried && planted))
         (before = { score: score() }), plant(bx + 2, by + BULLET_SPEED), planted++;
       const d = bx - rb(zp.player_x);
       hold(d > 0 ? "X" : d < 0 ? "Z" : null);
     } else if (phase === "line") {
       if (rb(zp.diver_state) !== 1) return false;
-      out.lineSize = 1 + rb(zp.wing_on) + rb(zp.wing_on + 1);
+      if (!shot) out.lineSize = 1 + rb(zp.wing_on) + rb(zp.wing_on + 1);
       if (rb(labels.bullets_on)) return false;
       if (shot === line) return (out.lineScore = score() - base), (out.power = rb(zp.power)), (phase = "look"), false;
       const sb = (a) => (rb(a) << 24) >> 24;
@@ -147,26 +181,55 @@ async function scenario({ power, shots = 0, last = false, volley = false, line =
     } else if (++look === 3) out.wing = wing, (done = true);
     return false;
   });
-  while (!done) await m.runFor(40000);
+  while (!done) {
+    await m.runFor(40000);
+    if (phase === "over" && !typed) {
+      typed = true;
+      console.log = () => {};
+      await m.runUntilInput();
+      await m.type(" ");
+      console.log = print;
+    }
+  }
   hook.remove();
   return out;
 }
 
-const hit = { points: 100, sound: "chime" };
+const hits = (...points) => points.map((p) => ({ points: p, sound: "chime" }));
 const cases = [
   { name: "single shot: a P; caught, the double shot", power: 0, want: { dropped: "P", hits: [], power: 1 } },
-  { name: "single shot: every hit scores 100 and chimes, nothing else", power: 0, shots: 3,
-    want: { dropped: "P", hits: [hit, hit, hit], power: 1 } },
+  { name: "single shot: hits score 50, 60, 70 and chime, nothing else", power: 0, shots: 3,
+    want: { dropped: "P", hits: hits(50, 60, 70), power: 1 } },
   { name: "double shot: a P; caught, rapid fire", power: 1, want: { dropped: "P", hits: [], power: 2 } },
   { name: "rapid fire: a P; caught, still rapid fire", power: 2, want: { dropped: "P", hits: [], power: 2 } },
-  { name: "rapid fire: the P shot four times scores 400", power: 2, shots: 4,
-    want: { dropped: "P", hits: [hit, hit, hit, hit], power: 2 } },
+  { name: "rapid fire: the P shot five times scores 50, 60, 70, 80, 80", power: 2, shots: 5,
+    want: { dropped: "P", hits: hits(50, 60, 70, 80, 80), power: 2 } },
+  { name: "the capsule's points carry on into the next stage", power: 0, shots: 2, carry: true,
+    want: { dropped: "P", hits: hits(50, 60), power: 1 } },
+  { name: "a new game puts the capsule's points back to 50", power: 0, newGame: true, want: { capsule: 5, power: 0 } },
   { name: `rapid fire: ${BULLETS} bullets in flight at once`, power: 2, volley: true, want: { power: 2, inFlight: BULLETS } },
-  { name: "a line of three: shooting all of it scores the bonus too", power: 0, line: 3,
-    want: { lineScore: 3 * ALIEN_POINTS + LINE_BONUS, lineSize: 3 } },
+  { name: "row 1 scores 40 at home", power: 0, form: 2, want: { formScore: 40, jingle: false } },
+  { name: "row 2 scores 30 at home", power: 0, form: 8, want: { formScore: 30, jingle: false } },
+  { name: "row 3 scores 20 at home", power: 0, form: 15, want: { formScore: 20, jingle: false } },
+  { name: "row 4 scores 20 at home", power: 0, form: 24, want: { formScore: 20, jingle: false } },
+  { name: "the boss scores 100 at home", power: 0, form: BOSS_SLOT, want: { formScore: 100, jingle: false } },
+  { name: "row 1 scores 80 diving", power: 0, line: 1, slot: 3, want: { lineScore: 80, jingle: false } },
+  { name: "row 2 scores 60 diving", power: 0, line: 1, slot: 8, want: { lineScore: 60, jingle: false } },
+  { name: "row 3 scores 40 diving", power: 0, line: 1, slot: 15, want: { lineScore: 40, jingle: false } },
+  { name: "row 4 scores 40 diving", power: 0, line: 1, slot: 24, want: { lineScore: 40, jingle: false } },
+  { name: "the boss scores 200 diving", power: 0, line: 1, slot: BOSS_SLOT, want: { lineScore: 200, lineSize: 3, jingle: false } },
+  { name: "a line of three in row 3 totals 250, with the jingle", power: 0, line: 3,
+    want: { lineScore: 250, lineSize: 3, jingle: true } },
+  { name: "a line of three in row 4 totals 250, with the jingle", power: 0, line: 3, slot: 24,
+    want: { lineScore: 250, lineSize: 3, jingle: true } },
   { name: "a line of three from aliens at columns 0, 3 and 6 of a row", power: 0, line: 3, spread: true,
-    want: { lineScore: 3 * ALIEN_POINTS + LINE_BONUS, lineSize: 3 } },
-  { name: "a line of three: two of it shot, no bonus", power: 0, line: 2, want: { lineScore: 2 * ALIEN_POINTS } },
+    want: { lineScore: 250, lineSize: 3, jingle: true } },
+  { name: "a line of three: two of it shot, no bonus", power: 0, line: 2, want: { lineScore: 80, jingle: false } },
+  { name: "the boss and both guards total 500, with the jingle", power: 0, line: 3, slot: BOSS_SLOT,
+    want: { lineScore: 500, lineSize: 3, jingle: true } },
+  { name: "the boss and both guards from row 2 still total 500", power: 0, line: 3, slot: BOSS_SLOT, spare: [2, 4],
+    want: { lineScore: 500, lineSize: 3, jingle: true } },
+  { name: "the boss and one guard shot: no bonus", power: 0, line: 2, slot: BOSS_SLOT, want: { lineScore: 280, jingle: false } },
   { name: "rapid fire is kept at the wave's end", power: 2, last: true, want: { power: 2 } },
   { name: "double shot is kept at the wave's end", power: 1, last: true, want: { power: 1 } },
 ];

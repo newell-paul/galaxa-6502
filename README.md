@@ -1,3 +1,5 @@
+![Galaxa cassette box](cassette-box.png)
+
 # Galaxa (BBC Micro)
 
 An original fixed shooter for the BBC Micro Model B, written in 6502 assembly in 2026.
@@ -25,18 +27,13 @@ use Share → Add to Home Screen instead: it opens from there with no browser ba
 - Shoot the boss and it drops a **P** capsule. Catch it to power up: double shot, then
   rapid fire. Your ship's wings show the level (cyan, yellow, red). You keep it until you
   lose a ship.
-- Every hit on a falling capsule scores 100, so with rapid fire it pays to shoot the boss
-  high up and keep the capsule in the air.
+- Hits on a falling capsule score too, and pay more as the game goes on, so with rapid fire
+  it pays to shoot the boss high up and keep the capsule in the air.
 - Each stage dives sooner and fires more, up to stage 8; after that the dives keep
   coming a frame sooner each stage.
 - Three ships. Each new stage adds a bonus.
-
-| Target | Points |
-|--------|--------|
-| Alien in formation | 10 |
-| Diving alien | 50 |
-| Capsule hit | 100 |
-| Reaching stage N (from 2) | N × 500 |
+- The boss is worth the most and the rows score less going down. Diving aliens score more,
+  and shooting a whole swoop earns a bonus and a jingle.
 
 ## Build and run
 

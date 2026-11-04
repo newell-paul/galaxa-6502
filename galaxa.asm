@@ -1,5 +1,5 @@
 ; ------------------------------------------------------------------------------------------------------
-; Paul Newell 2026 - Version 0.9.0
+; Paul Newell 2026 - Version 0.9.1
 ; Galaxa - BBC Micro Model B fixed shooter (MODE 2, 6502, BeebAsm)
 ; Sprites are EORed and pre-shifted twice so they sit on any pixel; a 1px move is one delta plot,
 ; so no byte ever shows blank mid-frame. Objects redraw top to bottom just behind the beam
@@ -7,7 +7,7 @@
 ; so neither disturbs the other. Loads at &1900, copies down to &0E00 (DFS workspace, free once loaded).
 ; ------------------------------------------------------------------------------------------------------
 
-VERSION = "0.9.0"                   ; tools/title.mjs puts it on the title screen
+VERSION = "0.9.1"                  ; tools/title.mjs puts it on the title screen
 
 OSRDCH = &FFE0
 OSWRCH = &FFEE
@@ -158,7 +158,11 @@ LAP_ROW      = 2              ; from this row down, a dive opens with a full, ro
 TRAIL        = 8              ; frames between aliens in a line: they just clear each other over a loop's top
 TRAIL_LEN    = 2 * TRAIL      ; a power of 2: the lead's last positions
 LAP_Y        = 140            ; a line drops to here to loop: a loop's top clears the formation
-LINE_BONUS   = &50            ; BCD, the HUD adds a trailing 0: for shooting a whole line
+BOSS_POINTS  = &10
+LINE_TOTAL   = &25
+BOSS_TOTAL   = &50
+CAPSULE_MIN  = &05
+CAPSULE_MAX  = &08
 DIVE_VMAX    = 24
 DIVE_XMAX    = 2
 WARP_TIME    = 150
@@ -190,12 +194,12 @@ AFIRE_LOW    = PLAYER_Y - 24
 GLYPHS       = 15
 GLYPH_PLUS   = 14
 GLYPH_W      = 10
-GLYPH_COLOUR = 7               ; white: the score and WAVE banner
+GLYPH_COLOUR = 7               ; white
 BANNER_Y     = 120
 BANNER_COL   = 7
 BANNER_TIME  = 100
-BONUS_DELAY  = 35                 ; the banner and its tune before the bonus ticks in: the tick flushes channel 3
-BONUS_TICK   = 5                  ; then 100 every 100ms, each tick a semitone higher
+BONUS_DELAY  = 35                 ; the banner and its tune first: the tick flushes channel 3
+BONUS_TICK   = 5                  ; each tick a semitone higher
 TICK_PITCH   = 101
 TICK_TOP     = 249                ; the tick's pitch stops rising here
 DROP_Y       = 8
@@ -267,7 +271,7 @@ power        = &83            ; 0 single shot, 1 double, 2 double and rapid fire
 bonus_on     = &84
 bonus_x      = &85
 bonus_y      = &86
-stage_bonus  = &87            ; BCD: 500s still to add, one a frame
+stage_bonus  = &87
 tune_x       = &88
 tune_n       = &89
 expl_t      = &6A            ; frames the explosion has left, 0: none
@@ -367,7 +371,7 @@ GUARD &40
     SKIP 1
 .diver_half                         ; a full loop flies each step of the half loop's table twice
     SKIP 1
-.line_left                          ; of a line of three, how many are still to be shot
+.line_left
     SKIP 1
 .diver_xf
     SKIP 1
@@ -379,9 +383,9 @@ GUARD &40
     SKIP 1
 .sort_idx
     SKIP ORDER_N
-.bonus_sub                          ; 100s left of the 500 being ticked in
+.swoop_pts
     SKIP 1
-.bonus_wait                         ; frames to the next 100
+.bonus_wait
     SKIP 1
 .expl_y
     SKIP 1
@@ -396,6 +400,8 @@ GUARD &0800
     SKIP FORM_ROWS
 .row_bdir
     SKIP FORM_ROWS
+.capsule_pts
+    SKIP 1
 .alive
     SKIP FORM_SLOTS
 .font1
@@ -453,7 +459,7 @@ GUARD &0DF0
     LDX #LO(txt_mode7) : LDY #HI(txt_mode7) : JSR print_vdu
     JSR draw_title
     LDX hs_new : JSR hs_row
-    LDY #0 : LDA #TT_FLASH : STA (ptr1),Y   ; the new score flashes, or the blank row below
+    LDY #0 : LDA #TT_FLASH : STA (ptr1),Y
     JSR OSRDCH
     LDA #&01 : STA SYS_IER          ; keyboard IRQ off: the OS handler would steal time mid-frame
     SEI                             ; nor the 100Hz held-key poll: ~1ms a tick
@@ -468,6 +474,7 @@ GUARD &0DF0
 
 .new_game
     LDA #0 : STA score_lo : STA score_hi : STA wave
+    LDA #CAPSULE_MIN : STA capsule_pts
     LDA #DIVE_LAST : STA dive_delays + LEVELS - 1
     LDA #3 : STA lives
     LDA #PLAYER_START : STA player_x
@@ -571,17 +578,16 @@ GUARD &0DF0
     DEX : BPL nw_abullets
     STA burst_left : STA afire_armed   ; A = 0 either way out of the loop
     JSR intro_frame
-    LDA wave : CMP #2 : BCS nw_bonus    ; N x 500, ticked in 100s under the banner
-    LSR A                               ; none for stage 1: the game starts on 0
+    LDA wave : CMP #2 : BCS nw_bonus
+    LSR A
 .nw_bonus
     STA stage_bonus
-    LDA #5 : STA bonus_sub
     LDA #TICK_PITCH - 4 : STA sfx_data + SND_TICK + 2
     LDA #BONUS_DELAY : STA bonus_wait
     JSR toggle_banner
     LDX #SND_WAVE : JSR play_tune
     LDA #BANNER_TIME : STA intro_t
-.nw_banner                          ; at least BANNER_TIME, and until the bonus is in
+.nw_banner                          ; at least BANNER_TIME
     JSR intro_frame
     LDA intro_t : BEQ nw_counted
     DEC intro_t
@@ -639,8 +645,6 @@ GUARD &0DF0
     ADC #4 : STA sfx_data + SND_TICK + 2
 .if_top
     LDX #SND_TICK : JSR sound
-    DEC bonus_sub : BNE if_tune
-    LDA #5 : STA bonus_sub
     SED : LDA stage_bonus : SEC : SBC #1 : STA stage_bonus : CLD
 .if_tune
     JMP play_sfx                    ; a tune started by the wave's last kill plays on
@@ -714,7 +718,7 @@ GUARD &0DF0
 .ss_entry
     JSR hs_row
     LDY #2
-    LDA hs_data + 2,X               ; stage reached: a green square each, then blank
+    LDA hs_data + 2,X
     BNE ss_stage
     LDA #'.'                        ; none: dots, after the title's blue
 .ss_none
@@ -723,7 +727,7 @@ GUARD &0DF0
     INY : INY : BNE ss_score        ; past the yellow
 .ss_stage
     CMP #&10 : BCC ss_bin
-    SBC #7                          ; BCD 10, 11 and 12+: enough for 12 dots; C set: - 6
+    SBC #7
 .ss_bin
     ADC #3 : STA tmp2
     LDA #TT_GREEN
@@ -740,7 +744,7 @@ GUARD &0DF0
     INX
     CPX #HS_ENTRIES * 3 : BNE ss_entry
     RTS
-.ss_bcd                             ; in: X = the BCD byte's offset, Y = screen offset
+.ss_bcd
     LDA hs_data,X : INX
     PHA : LSR A : LSR A : LSR A : LSR A
     JSR ss_digit
@@ -764,7 +768,6 @@ GUARD &0DF0
     RTS
 ASSERT LO(MODE7_SCREEN + HS_ROW * 40 + HS_COL) >= 40
 
-; out: hs_new = offset or HS_ENTRIES * 3. A tie goes below the older score
 .insert_score
     LDX #0
 .is_find
@@ -847,7 +850,7 @@ ASSERT LO(MODE7_SCREEN + HS_ROW * 40 + HS_COL) >= 40
     EQUB 3, 2, 165, 2 : EQUB 3, 2, 177, 2 : EQUB 3, 2, 197, 8
     EQUB &13, 2, 101, 2 : EQUB 3, 2, 117, 2 : EQUB 3, 2, 129, 2 : EQUB 3, 2, 149, 6
     EQUB &13, 2, 129, 4 : EQUB 3, 2, 117, 4 : EQUB 3, 2, 105, 4 : EQUB 3, 2, 89, 10
-    EQUB &13, 2, TICK_PITCH, 1      ; the stage bonus tick: intro_frame raises its pitch
+    EQUB &13, 2, TICK_PITCH, 1      ; intro_frame raises its pitch
     EQUB &13, 2, 229, 4             ; the capsule shot
 SND_POWER = 5 * 4
 SND_WAVE = 14 * 4
@@ -865,7 +868,7 @@ ORG &0E00
 
 .main_start
 
-; --- Title screen and high scores ---
+; --- Title screen ---
 
 ; format: see tools/title.mjs
 .draw_title
@@ -1304,6 +1307,7 @@ ASSERT ABULLETS = 3 AND BULLETS = 3 AND ORDER_N = 8   ; update_abullet: AND #3, 
     LDA diver_y : STA hit_y : JSR beam_guard_alien
     JSR draw_diver
     LDX diver_slot : LDA #ALIVE_GONE : STA alive,X
+    LDY diver_slot : JSR score_dive
     LDA wing_on : ORA wing_on + 1 : STA lead_gone
     BNE cbh_line
     BEQ cbh_over
@@ -1325,6 +1329,7 @@ ASSERT ABULLETS = 3 AND BULLETS = 3 AND ORDER_N = 8   ; update_abullet: AND #3, 
     LDX wing_k : JSR draw_wing
     LDX wing_k : LDY wing_slot,X
     LDA #ALIVE_GONE : STA alive,Y : STA wing_on,X
+    JSR score_dive
     LDA lead_gone : BEQ cbh_line
     LDA wing_on : ORA wing_on + 1 : BNE cbh_line
 .cbh_over                           ; A = 0
@@ -1332,14 +1337,18 @@ ASSERT ABULLETS = 3 AND BULLETS = 3 AND ORDER_N = 8   ; update_abullet: AND #3, 
     STA diver_state : STA diver_wrap
 .cbh_line
     DEC line_left : BNE cbh_scored
-    LDA #LINE_BONUS : JSR add_score
+    LDA #LINE_TOTAL : LDY diver_slot : CPY #BOSS_SLOT : BNE cbh_bonus
+    LDA #BOSS_TOTAL
+.cbh_bonus
+    SED : SEC : SBC swoop_pts : CLD
+    JSR add_score
     SFX SFX_POWER
 .cbh_scored                         ; X = the slot shot, or a wing's index
     JSR expl_start
     DEC alive_count
     JSR bonus_drop
     SFX SFX_HIT
-    LDA #&05 : JMP add_score        ; BCD, the HUD adds a trailing 0
+    RTS
 
 .play_tune
     LDA #0 : STA tune_n             ; they cut off a tune still going out
@@ -1631,7 +1640,7 @@ ASSERT ABULLETS = 3 AND BULLETS = 3 AND ORDER_N = 8   ; update_abullet: AND #3, 
     STX diver_slot
     LDA #ALIVE_DIVING : STA alive,X
     LDA #0 : STA wing_on : STA wing_on + 1 : STA lead_gone
-    STA wing_shot : STA wing_shot + 1 : STA line_left : STA diver_half
+    STA wing_shot : STA wing_shot + 1 : STA line_left : STA diver_half : STA swoop_pts
     LDA #BOSS_SLOT : STA wing_slot : STA wing_slot + 1  ; never diving in a line: line_regroup skips it
     CPX #BOSS_SLOT : BEQ ud_guards
     LDA slot_row,X : STA tmp
@@ -1669,6 +1678,8 @@ ASSERT LAP_ROW = 2 AND WINGS = 2 AND FORM_ROWS = 4
     INC wing_on,X
 .ud_side_next
     DEX : BPL ud_side
+    LDA wing_on : AND wing_on + 1 : BEQ ud_solo
+    LDA #3 : STA line_left
 .ud_solo
     LDX diver_slot
     JSR home_pos
@@ -2206,10 +2217,35 @@ NEXT
     LDY #0
     RTS
 
-; every hit scores 100 and chimes; the capsule falls on, still to be caught
+.cbh_boss_home
+    LDA #BOSS_POINTS : JSR add_score
+    JMP cbh_scored
+.score_form
+    LDY loop_i : JSR slot_points
+    JMP add_score
+.score_dive                         ; Y = the slot; X is kept
+    JSR slot_points
+    ASL A
+    PHA
+    SED : CLC : ADC swoop_pts : STA swoop_pts : CLD
+    PLA
+    JMP add_score
+.slot_points                        ; Y = the slot; X is kept
+    LDA #BOSS_POINTS
+    CPY #BOSS_SLOT : BEQ sp_ret
+    LDA slot_row,Y : TAY : LDA row_points,Y
+.sp_ret
+    RTS
+.row_points
+    EQUB &04, &03, &02, &02
+
+; the capsule falls on, still to be caught
 .shoot_capsule
     JSR kill_bullet
-    LDA #&10 : JSR add_score        ; BCD, the HUD adds a trailing 0
+    LDA capsule_pts : JSR add_score
+    LDA capsule_pts : CMP #CAPSULE_MAX : BCS sc_top
+    INC capsule_pts
+.sc_top
     LDA #SND_SHOT : STA tune_x
     LDA #1 : STA tune_n
     RTS
@@ -2242,7 +2278,7 @@ NEXT
     INC fire_n
     RTS
 
-; --- Keyboard, score and text ---
+; --- Keyboard and text ---
 
 ; Z wins if both directions are held
 .read_keys
@@ -2294,7 +2330,7 @@ ENDIF
 .ph_digit
     STX hud_k
     TXA : LSR A : EOR #1 : TAY
-    LDA score_lo,Y                  ; digits 0-1: score_hi, 2-3: score_lo
+    LDA score_lo,Y
     BCS ph_low
     LSR A : LSR A : LSR A : LSR A
 .ph_low
@@ -2348,9 +2384,9 @@ FOR n, 0, 15 : EQUB (n AND 3) * GLYPH_BITS : NEXT
 
 ; --- Data ---
 
-.hs_data                            ; 5 x BCD score high, low, stage reached: none for the defaults
+.hs_data
     EQUB &05, &00, 0, &04, &00, 0, &03, &00, 0, &02, &00, 0, &01, &00, 0
-.hs_new                             ; offset of the new score's entry, or HS_ENTRIES * 3
+.hs_new
     EQUB HS_ENTRIES * 3
 .txt_game_over
     EQUB 12, 31, 6, 15 : EQUS "GAME OVER"
@@ -2736,7 +2772,7 @@ GUARD &01C3
     LDA boss_y : STA hit_y : JSR beam_guard_alien
     JSR boss_draw
     LDX #BOSS_SLOT : LDA #ALIVE_GONE : STA alive,X
-    JMP cbh_scored
+    JMP cbh_boss_home
 .cbh_rows
     LDX #FORM_ROWS - 1
 .cbh_row
@@ -2764,7 +2800,7 @@ GUARD &01C3
     LDX loop_i : LDA #ALIVE_GONE : STA alive,X
     DEC alive_count
     SFX SFX_HIT
-    LDA #&01 : JMP add_score
+    JMP score_form
 
 ; A = top row
 .beam_guard_alien
@@ -2790,7 +2826,6 @@ GUARD &01C3
     INC ptr0 + 1 : BPL cs_page
     RTS
 
-; A = BCD points to add
 .add_score
     SED
     CLC : ADC score_lo : STA score_lo

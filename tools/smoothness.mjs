@@ -15,10 +15,10 @@
 //     their bullets move steadily
 //   - that each wave dives more often and fires more, and the last few aliens rush
 //   - that the stars show where RAM says, scroll and twinkle, and never mark a sprite
-//   - the stage bonus: reaching stage N > 1 scores N x 500, ticked in under its banner
+//   - the stage bonus, ticked in under its banner
 //   - the bonus capsule: only the boss drops it, no lower than BONUS_LOW, it falls 1.5px per frame, and catching it
 //     gives the double shot, then rapid fire, until a ship is lost, across stages
-//     (tools/capsule.mjs: each case, and the 100 points every hit scores)
+//     (tools/capsule.mjs: each case, and the scores)
 //   - the WAVE banner, and the rows dropping in from the top 1px per frame
 //   - dropped frames: the main loop missing a vsync
 //   - that SHIFT+BREAK boots to the title screen, and a hit ship flashes the screen
@@ -579,7 +579,7 @@ for (let i = 0; i < captured.length; i++) {
     if (!prev.bonus_on && ram.bonus_on && !bossShot) bonusEv.otherDrops++;
     if (!prev.intro && ram.intro) introScore = ram.score;
     if (prev.intro && !ram.intro && introScore != null) {
-      const got = ram.score - introScore, want = ram.wave > 1 ? ram.wave * 500 : 0;
+      const got = ram.score - introScore, want = ram.wave > 1 ? ram.wave * 100 : 0;
       (got === want ? stageBonus.paid : stageBonus.wrong).push([ram.wave, got]);
     }
     if (!prev.power && ram.power) bonusEv.catches++;
@@ -950,7 +950,7 @@ const checks = {
   "stars show where RAM says": starsMissing === 0,
   "stars scroll and twinkle": starsMoved > 0 && starsHidden > 0,
   "only the boss drops a capsule": bonusEv.otherDrops === 0,
-  "reaching stage N > 1 scores N x 500 under its banner": stageBonus.paid.some(([w]) => w >= 2) && stageBonus.wrong.length === 0,
+  "reaching stage N > 1 scores N x 100 under its banner": stageBonus.paid.some(([w]) => w >= 2) && stageBonus.wrong.length === 0,
   "the capsule falls 1.5px per frame": report.bonus.steps[1] > 0 && report.bonus.steps[2] > 0 &&
     only(report.bonus.steps, (d) => d === 1 || d === 2) &&
     Math.abs(report.bonus.steps[1] - report.bonus.steps[2]) <= Math.max(4, (report.bonus.steps[1] + report.bonus.steps[2]) / 10),
