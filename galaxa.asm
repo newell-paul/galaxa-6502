@@ -1,5 +1,5 @@
 ; ------------------------------------------------------------------------------------------------------
-; Paul Newell 2026 - Version 0.9.1
+; Paul Newell 2026 - Version 0.9.2
 ; Galaxa - BBC Micro Model B fixed shooter (MODE 2, 6502, BeebAsm)
 ; Sprites are EORed and pre-shifted twice so they sit on any pixel; a 1px move is one delta plot,
 ; so no byte ever shows blank mid-frame. Objects redraw top to bottom just behind the beam
@@ -7,7 +7,7 @@
 ; so neither disturbs the other. Loads at &1900, copies down to &0E00 (DFS workspace, free once loaded).
 ; ------------------------------------------------------------------------------------------------------
 
-VERSION = "0.9.1"                  ; tools/title.mjs puts it on the title screen
+VERSION = "0.9.2"                  ; tools/title.mjs puts it on the title screen
 
 OSRDCH = &FFE0
 OSWRCH = &FFEE
@@ -42,7 +42,7 @@ KEY_X        = &42
 KEY_RETURN   = &49
 KEY_P        = &37
 
-DEBUG =? 0                    ; make run-debug: P cycles the power level
+DEBUG =? 0                    ; make run-debug: P cycles the power level, and no ship is ever lost
 
 SYS_ORB      = &FE40          ; addressable latch: bit 3 = keyboard auto-scan
 SYS_DDRA     = &FE43
@@ -71,6 +71,7 @@ FLAG_FLASH   = 2              ; then red: frame bit 3, shifted twice
 BOSS_COLOUR  = 3
 BOSS_PHYS    = 3              ; yellow
 STAR_COLOUR  = 8              ; 9-15 repeat 1-7: a star never shows over a sprite
+STAR_PHYS    = 4              ; blue: dim, so a shot stands out against them
 
 NUM_STARS    = 30
 STAR_TOP     = 16             ; below the HUD: the beam has passed it when stars move
@@ -111,17 +112,20 @@ PS_OVER      = 3
 GAME_OVER_TIME = 100
 
 HS_ENTRIES   = 5
-HS_DIGITS    = 16
+HS_DIGITS    = 18
+HS_NAME      = HS_DIGITS + 6      ; the initials: after the score's fixed 0 and their colour
+HS_BLANK     = '-'
 TT_FLASH     = 136
+TT_RED       = 145              ; graphics: stage squares past 12 overwrite the green from the left
 TT_GREEN     = 146              ; graphics: the stage squares are sixels
+TT_HOLD      = 158              ; a control cell shows the last sixel, in the colour before it
+SQUARES      = 12
 ASSERT PLAYER_MAX_X + ALIEN_W <= 160
 
 FORM_COLS    = 7
 FORM_ROWS    = 4
 FORM_COUNT   = FORM_COLS * FORM_ROWS
-FORM_SHAPE   = "0011100" + "0110110" + "0111110" + "1111111"   ; top down: 3, 4, 5, 7 under the boss
 FORM_PULL    = "0800"         ; px each side moves in, per row: the 4 sit between the columns
-WAVE_COUNT   = 3 + 4 + 5 + 7  ; the 1s in FORM_SHAPE
 ASSERT FORM_COLS MOD 2 = 1    ; the middle column under the boss; uf_col's walk
 FORM_Y       = 32
 COL_STEP     = ALIEN_W + 5
@@ -274,6 +278,7 @@ bonus_y      = &86
 stage_bonus  = &87
 tune_x       = &88
 tune_n       = &89
+progress     = &8A            ; stages begun this game; bit 7: the top score is passed
 expl_t      = &6A            ; frames the explosion has left, 0: none
 expl_x      = &6B
 ; &90-&CF: filing system workspace, unused once loaded (checked in jsbeeb)
@@ -458,8 +463,7 @@ GUARD &0DF0
     LDA #21 : JSR OSBYTE            ; X = 0 from the loop: flush the keyboard buffer
     LDX #LO(txt_mode7) : LDY #HI(txt_mode7) : JSR print_vdu
     JSR draw_title
-    LDX hs_new : JSR hs_row
-    LDY #0 : LDA #TT_FLASH : STA (ptr1),Y
+    JSR hs_enter
     JSR OSRDCH
     LDA #&01 : STA SYS_IER          ; keyboard IRQ off: the OS handler would steal time mid-frame
     SEI                             ; nor the 100Hz held-key poll: ~1ms a tick
@@ -486,7 +490,7 @@ GUARD &0DF0
 .ng_shown
     STA shown,X : DEX : BPL ng_shown
     JSR print_hud
-    LDA #0 : STA keys : STA fire_cool : STA defer : STA queue_n : STA sfx : STA tune_n
+    LDA #0 : STA keys : STA fire_cool : STA defer : STA queue_n : STA sfx : STA tune_n : STA progress
     STA ships_shown : STA player_state
     STA power : STA bonus_on : STA stage_bonus
     STA bullets_on : STA bullets_on + 1 : STA bullets_on + 2   ; CLS has wiped them
@@ -521,7 +525,7 @@ GUARD &0DF0
     JSR update_in_beam_order
     JSR update_expl
     JSR check_player_hit
-    JSR play_sfx                    ; the beam is done with the sprites: time to spare
+    JSR frame_sfx                   ; the beam is done with the sprites: time to spare
     LDA player_state : CMP #PS_OVER : BEQ game_over
     LDA alive_count : BNE main_loop
     JSR new_wave
@@ -540,10 +544,7 @@ GUARD &0DF0
 .new_wave
     SED : LDA wave : CLC : ADC #1 : STA wave : CLD
     JSR set_level
-    LDX #FORM_SLOTS - 1
-.nw_fill
-    LDA slot_start,X : STA alive,X
-    DEX : BPL nw_fill
+    JSR form_fill
     LDX #FORM_ROWS - 1
 .nw_rows
     LDA #FX_START : STA row_x,X
@@ -551,7 +552,6 @@ GUARD &0DF0
     LDA #0 : STA row_anim,X : STA row_bofs,X : STA row_y,X     ; 0: not dropped in yet
     LDA #FORM_COLS : STA row_bdir,X
     DEX : BPL nw_rows
-    LDA #WAVE_COUNT + 1 : STA alive_count     ; + the boss
     LDX level : LDA dive_delays,X : STA dive_timer
     LDA #DIVER_NONE : STA diver_state : STA diver_pick : STA diver_wrap
     LDA #1 : STA intro
@@ -717,30 +717,40 @@ GUARD &0DF0
     LDX #0
 .ss_entry
     JSR hs_row
-    LDY #2
+    LDY #3
     LDA hs_data + 2,X
     BNE ss_stage
     LDA #'.'                        ; none: dots, after the title's blue
 .ss_none
     INY : STA (ptr1),Y
-    CPY #HS_DIGITS - 2 : BNE ss_none
-    INY : INY : BNE ss_score        ; past the yellow
+    CPY #HS_DIGITS - 3 : BNE ss_none
+    INY : INY : INY : BNE ss_score  ; past the yellow
 .ss_stage
-    CMP #&10 : BCC ss_bin
-    SBC #7
+    CMP #&10 : BCC ss_bin           ; BCD to binary, good to 24: anything past that is all red
+    SBC #6
+    CMP #&1A : BCC ss_bin
+    SBC #6
 .ss_bin
-    ADC #3 : STA tmp2
+    CMP #SQUARES + 1 : BCC ss_green
+    SBC #SQUARES
+    CMP #SQUARES + 1 : BCC ss_some
+    LDA #SQUARES - 1                ; C set: as SQUARES with it clear
+.ss_some
+    JSR ss_reds
+    BNE ss_fill
+.ss_green
+    ADC #4                          ; C clear from the BCC
+.ss_fill
+    STA tmp2
     LDA #TT_GREEN
-.ss_dot
-    CPY tmp2 : BCC ss_put
-    LDA #' '
-.ss_put
+.ss_dot                             ; the title's blanks stay, in cells 3 and 16 too
     STA (ptr1),Y
     LDA #&28                        ; one sixel: a small square
-    INY : CPY #HS_DIGITS - 1 : BNE ss_dot
-    INY                             ; past the yellow
+    INY : CPY tmp2 : BNE ss_dot
+    LDY #HS_DIGITS                  ; past the yellow
 .ss_score
     JSR ss_bcd : JSR ss_bcd
+    JSR ss_name
     INX
     CPX #HS_ENTRIES * 3 : BNE ss_entry
     RTS
@@ -784,11 +794,13 @@ ASSERT LO(MODE7_SCREEN + HS_ROW * 40 + HS_COL) >= 40
 .is_shift
     CPY tmp : BCC is_put
     LDA hs_data - 3,Y : STA hs_data,Y
+    LDA hs_names - 3,Y : STA hs_names,Y
     DEY : BPL is_shift
 .is_put
     LDA score_hi : STA hs_data,X
     LDA score_lo : STA hs_data + 1,X
     LDA wave : STA hs_data + 2,X
+    LDA #HS_BLANK : STA hs_names,X : STA hs_names + 1,X : STA hs_names + 2,X   ; hs_enter asks for them
 .is_ret
     RTS
 
@@ -852,11 +864,13 @@ ASSERT LO(MODE7_SCREEN + HS_ROW * 40 + HS_COL) >= 40
     EQUB &13, 2, 129, 4 : EQUB 3, 2, 117, 4 : EQUB 3, 2, 105, 4 : EQUB 3, 2, 89, 10
     EQUB &13, 2, TICK_PITCH, 1      ; intro_frame raises its pitch
     EQUB &13, 2, 229, 4             ; the capsule shot
+    EQUB &13, 2, 165, 2 : EQUB 3, 2, 181, 2 : EQUB 3, 2, 193, 2 : EQUB 3, 2, 213, 10    ; past the top score
 SND_POWER = 5 * 4
 SND_WAVE = 14 * 4
 SND_OVER = 18 * 4
 SND_TICK = 22 * 4
 SND_SHOT = 23 * 4
+SND_TOP = 24 * 4
 
 .lo_end
 .trail_x                            ; not loaded: filled at each line's launch
@@ -2046,8 +2060,11 @@ ASSERT LAP_ROW = 2 AND WINGS = 2 AND FORM_ROWS = 4
 
 .player_hit
     SFX SFX_DIE OR SFX_RUMBLE
-    LDA #0 : STA power
+    LDA power : BEQ P% + 4
+    DEC power                       ; a level down, not all of it
+IF DEBUG = 0
     DEC lives
+ENDIF
     LDA #PS_DYING : STA player_state
     LDA #DIE_TIME : STA player_t
 .cph_none
@@ -2324,6 +2341,19 @@ ENDIF
     AND #&80 : EOR #&80
     RTS
 
+; The frame's sounds, and once a game a fanfare as the score passes the table's top. Here, not
+; in print_hud: that runs ahead of the beam.
+.frame_sfx
+    BIT progress : BMI fs_play
+    LDA score_hi : CMP hs_data : BCC fs_play : BNE fs_past
+    LDA hs_data + 1 : CMP score_lo : BCS fs_play
+.fs_past
+    LDA progress : ORA #&80 : STA progress
+    LDA #SND_TOP : STA tune_x
+    LDA #4 : STA tune_n
+.fs_play
+    JMP play_sfx
+
 .print_hud
     LDA #0 : STA hud_dirty
     LDX #3
@@ -2384,10 +2414,6 @@ FOR n, 0, 15 : EQUB (n AND 3) * GLYPH_BITS : NEXT
 
 ; --- Data ---
 
-.hs_data
-    EQUB &05, &00, 0, &04, &00, 0, &03, &00, 0, &02, &00, 0, &01, &00, 0
-.hs_new
-    EQUB HS_ENTRIES * 3
 .txt_game_over
     EQUB 12, 31, 6, 15 : EQUS "GAME OVER"
 .txt_mode7
@@ -2413,9 +2439,43 @@ FOR j, 0, NUM_STARS - 1 : i = 3 * (j MOD 10) + j DIV 10 : EQUB (i * 135 + i * i 
 .star_y0
 FOR j, 0, NUM_STARS - 1 : i = 3 * (j MOD 10) + j DIV 10 : EQUB STAR_TOP + (i * 189 + i * i * 8) MOD (256 - STAR_TOP) : NEXT
 
-.slot_start
-FOR i, 0, FORM_COUNT - 1 : EQUB VAL(MID$(FORM_SHAPE, i + 1, 1)) * ALIVE_HOME : NEXT
-    EQUB ALIVE_HOME
+; The stage's formation, under the boss: four shapes by turns, a row a byte, top down, column 0
+; in bit 7. Row 1's middle column stays empty: FORM_PULL moves its two sides in over it. A frame
+; steps rows 0 and 2 (and the boss), or 1 and 3: no more than stage 1's 8 and 11, or a busy frame runs over.
+.shapes
+    EQUB %01010100, %01101100, %10111010, %01111100     ; stages 4, 8..: 3, 4, 5, 5
+    EQUB %00111000, %01101100, %01111100, %11111110     ; stages 1, 5..: 3, 4, 5, 7
+    EQUB %00010000, %01101100, %11111110, %01111100     ; stages 2, 6..: 1, 4, 7, 5
+    EQUB %01101100, %01101100, %01101100, %11101110     ; stages 3, 7..: 4, 4, 4, 6
+.themes                             ; logical 1, 5 and 4 (and a spare), 4 stages each: logical * 16 + physical EOR 7
+    EQUB &10 + (1 EOR 7), &50 + (5 EOR 7), &40 + (4 EOR 7), 0   ; red, magenta, blue
+    EQUB &10 + (2 EOR 7), &50 + (4 EOR 7), &40 + (5 EOR 7), 0   ; green, blue, magenta
+    EQUB &10 + (5 EOR 7), &50 + (2 EOR 7), &40 + (6 EOR 7), 0   ; magenta, green, cyan
+    EQUB &10 + (6 EOR 7), &50 + (5 EOR 7), &40 + (2 EOR 7), 0   ; cyan, magenta, green
+; 5 and 4 are never a shot's yellow or red: a wing's edge is a shot's shape
+.form_fill
+    LDA progress : INC progress
+    AND #&0C : TAX
+    LDY #3
+.ff_theme
+    LDA themes,X : STA ULA_PALETTE
+    EOR #STAR_COLOUR * 16 : STA ULA_PALETTE     ; and its copy over a star
+    INX : DEY : BNE ff_theme
+    LDA wave : AND #3 : ASL A : ASL A : TAY
+    LDX #0 : STX alive_count
+.ff_row
+    LDA shapes,Y : INY : STA tmp
+.ff_slot
+    LDA #0 : ASL tmp : ROL A
+    STA alive,X : BEQ ff_next       ; ALIVE_HOME or ALIVE_GONE
+    INC alive_count
+.ff_next
+    INX : LDA slot_col,X : BNE ff_slot
+    CPX #FORM_COUNT : BNE ff_row
+    INC alive_count                 ; and the boss
+    LDA #ALIVE_HOME : STA alive + BOSS_SLOT
+    RTS
+ASSERT ALIVE_HOME = 1 AND ALIVE_GONE = 0
 .slot_col                           ; one extra entry so the last row's walk ends on 0
 FOR i, 0, FORM_COUNT : EQUB i MOD FORM_COLS : NEXT
     EQUB 1                          ; ends uf_col's odd pass on the last row
@@ -2543,7 +2603,7 @@ ENDMACRO
 ART_PLAYER = "00077000" + "00077000" + "00777700" + "06755760" + "66777766" + "67777776" + "60077006" + "00500500"
 ART_BULLET = "77" + "77" + "77" + "77"
 ART_BULLET_STEP = "77777777" + STRING$(BULLET_SPEED - 4, "00") + "77777777"
-ART_ABULLET = "1" + "7" + "7" + "7"
+ART_ABULLET = "2" + "2" + "2" + "2"
 ART_BONUS   = "0222220" + "2244422" + "2242422" + "2244422" + "2242222" + "2242222" + "0222220" + "0000000"
 ART_FLAGSHIP   = "0000110000" + "0006666000" + "7706006077" + "7776666777" + "0776006770" + "0006666000" + "0061661600" + "0060000600"
 ART_FLAGSHIP_B = "7700110077" + "7776666777" + "0776006770" + "0006666000" + "0006006000" + "0006666000" + "0061661600" + "0060000600"
@@ -2652,7 +2712,7 @@ ART_DRONE_B    = "0040000400" + "0040000400" + "6055555506" + "6574554756" + "05
     IMG_ENTRY ALIEN_W
     IMG_ENTRY EXPL_W
 .ula_setup                          ; logical * 16 + physical EOR 7
-    EQUB STAR_COLOUR * 16 + (7 EOR 7)
+    EQUB STAR_COLOUR * 16 + (STAR_PHYS EOR 7)
     EQUB 9 * 16 + (1 EOR 7)         ; 9-15: a sprite colour over a star shows the sprite
     FOR c, 12, 15 : EQUB c * 16 + ((c - 8) EOR 7) : NEXT   ; 2 and 10: pulse_capsule
     EQUB BOSS_COLOUR * 16 + (BOSS_PHYS EOR 7), (BOSS_COLOUR + 8) * 16 + (BOSS_PHYS EOR 7)
@@ -2662,6 +2722,8 @@ ART_DRONE_B    = "0040000400" + "0040000400" + "6055555506" + "6574554756" + "05
     EQUB 22, 2
     EQUB 23, 1, 0, 0, 0, 0, 0, 0, 0, 0   ; cursor off
 .vdu_setup_end
+
+INCLUDE "title.asm"
 
 .end
 ASSERT end <= SCREEN              ; the loader below only runs at load time
@@ -2754,7 +2816,58 @@ GUARD &0800
 .ux_ret
     RTS
 
-INCLUDE "title.asm"
+; --- High score initials ---
+
+.hs_names                           ; an entry's 3, in hs_data's order
+    EQUS "LDA", "STA", "JMP", "RTS", "BRK"
+ASSERT P% - hs_names = HS_ENTRIES * 3
+.hs_data                            ; straight after the names: tools/web/play.js keeps the two as one
+    EQUB &05, &00, 0, &04, &00, 0, &03, &00, 0, &02, &00, 0, &01, &00, 0
+.hs_new
+    EQUB HS_ENTRIES * 3
+
+.ss_name                            ; X = the entry's last byte, kept; ptr1 = its row
+    LDY #HS_NAME
+    LDA hs_names - 2,X : STA (ptr1),Y : INY
+    LDA hs_names - 1,X : STA (ptr1),Y : INY
+    LDA hs_names,X : STA (ptr1),Y
+    RTS
+
+; The title: a new score's row flashes, and its 3 initials are typed in. A to Z, DELETE steps back.
+.hs_enter
+    LDX hs_new : JSR hs_row
+    LDY #0 : LDA #TT_FLASH : STA (ptr1),Y
+    CPX #HS_ENTRIES * 3 : BEQ hp_ret        ; none
+    LDX #PROMPT_LEN - 1 : JSR he_prompt
+    LDX hs_new
+    LDY #HS_NAME
+.he_key
+    JSR OSRDCH
+    CMP #127 : BNE he_letter
+    CPY #HS_NAME : BEQ he_key
+    DEY : DEX
+    LDA #HS_BLANK : STA hs_names,X : STA (ptr1),Y
+    BNE he_key
+.he_letter
+    AND #&DF                        ; lower case too
+    CMP #'A' : BCC he_key
+    CMP #'Z' + 1 : BCS he_key
+    STA hs_names,X : STA (ptr1),Y
+    INX : INY
+    CPY #HS_NAME + 3 : BNE he_key
+    LDX #2 * PROMPT_LEN - 1         ; the title's own prompt again
+.he_prompt                          ; X = the last letter of one of txt_prompts
+    LDY #PROMPT_LEN - 1
+.hp_put
+    LDA txt_prompts,X : STA MODE7_SCREEN + PROMPT_ROW * 40 + PROMPT_COL,Y
+    DEX : DEY : BPL hp_put
+.hp_ret
+    RTS
+.txt_prompts
+    EQUS "YOUR INITIALS", "PRESS ANY KEY"
+PROMPT_LEN = 13
+ASSERT P% - txt_prompts = 2 * PROMPT_LEN
+
 .hi_end
 
 ; --- OS workspace blocks ---
@@ -2865,6 +2978,25 @@ GUARD &03E0
     LDA bullet_x : ADC #1 : SEC : SBC tmp   ; C clear from the BCS
     CMP #ALIEN_W + 1
 .cn_ret
+    RTS
+
+; In: A = red squares, plus C: 1 to 12 with C clear, or 11 with C set. Squares fill cells 4 to
+; 15. Held, the green's control cell shows the last red, so reds land exactly on the greens.
+; A lone red has no sixel before that cell to hold, so the second square stays blank. Hold is
+; set from the title's blue cell; cell 16 is a blank sixel, or the yellow would hold a square.
+.ss_reds
+    ADC #3 : STA tmp2
+    CMP #4 : BNE sr_hold
+    INC tmp2 : BNE sr_first
+.sr_hold
+    LDA #TT_HOLD : LDY #2 : STA (ptr1),Y : INY
+.sr_first
+    LDA #TT_RED
+.sr_dot
+    STA (ptr1),Y
+    LDA #&28
+    INY : CPY tmp2 : BNE sr_dot
+    LDA #SQUARES + 4
     RTS
 
 .b2_end

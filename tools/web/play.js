@@ -90,6 +90,37 @@ for (const button of document.querySelectorAll("[data-key]")) {
 }
 screen.addEventListener("pointerdown", resumeAudio);
 
+// The score table outlives the page: the game keeps its 5 names and scores as one run of
+// bytes, found here by the table the disc ships with, and patched into the disc before it boots.
+const SCORES = "galaxa.scores";
+const SEED = [...[..."LDASTAJMPRTSBRK"].map((c) => c.charCodeAt(0)), 5, 0, 0, 4, 0, 0, 3, 0, 0, 2, 0, 0, 1, 0, 0];
+const find = (at, want, from, to) => {
+  for (let i = from; i + want.length <= to; i++) if (want.every((b, k) => at(i + k) === b)) return i;
+  return -1;
+};
+const valid = (t) => Array.isArray(t) && t.length === SEED.length && t.every((b, i) =>
+  i < 15 ? b === 45 || (b >= 65 && b <= 90) : Number.isInteger(b) && (b & 15) < 10 && b >> 4 < 10);
+function savedScores() {
+  try {
+    const t = JSON.parse(localStorage.getItem(SCORES));
+    return valid(t) ? t : null;
+  } catch {
+    return null;
+  }
+}
+function keepScores(table) {
+  let ram = -1;
+  setInterval(() => {
+    if (ram < 0) return void (ram = find((a) => cpu.readmem(a), table, 0x400, 0x800)); // once the loader has run
+    const now = SEED.map((_, i) => cpu.readmem(ram + i));
+    if (!valid(now) || now.every((b, i) => b === table[i])) return;
+    table = now;
+    try {
+      localStorage.setItem(SCORES, JSON.stringify(now));
+    } catch {} // private browsing: the table lasts the visit
+  }, 1000);
+}
+
 let last = 0;
 function frame(now) {
   requestAnimationFrame(frame);
@@ -101,6 +132,9 @@ function frame(now) {
 async function boot() {
   await cpu.initialise();
   const data = new Uint8Array(await (await fetch(DISC)).arrayBuffer());
+  const saved = savedScores(), at = find((i) => data[i], SEED, 0, data.length);
+  if (saved && at >= 0) data.set(saved, at);
+  if (at >= 0) keepScores(saved ?? SEED);
   cpu.fdc.loadDisc(0, fdc.discFor(cpu.fdc, DISC, data));
   cpu.sysvia.keyDown(SHIFT, true); // SHIFT held from power on: the disc boots
   setTimeout(() => cpu.sysvia.keyUp(SHIFT), 1000);
