@@ -98,6 +98,7 @@ const FLANK = num("FLANK");
 const INTRO_WARP = num("INTRO_WARP");
 const WARP_VMAX = num("WARP_VMAX");
 const STAR_TOP = num("STAR_TOP");
+const STAR_PHYS = num("STAR_PHYS");
 // Logical colour -> the physical colours it can show; the pulsing one cycles.
 const PULSE_COLOUR = num("FLAG_COLOUR");
 const pulse = [num("FLAG_PHYS"), num("FLAG_PHYS") ^ num("FLAG_FLASH")];
@@ -106,9 +107,13 @@ const bossColours = [num("BOSS_PHYS")];
 // The ship's wings: cyan, then from SPLIT_Y (timer 1, perhaps late) the power level's colour.
 const WING_COLOUR = num("WING_COLOUR"), SPLIT_Y = num("SPLIT_Y");
 const wingColours = [6, 3, 1];
+// The stage's theme: every 4 stages form_fill gives 3 logical colours new physical ones. Set for
+// each frame checked: this stage's, and the last's for the frame the ULA is written in.
+let themed = {};
 const shows = (logical, phys, y) =>
   logical === PULSE_COLOUR ? pulse.includes(phys) : logical === BOSS_COLOUR ? bossColours.includes(phys) :
-  logical === WING_COLOUR && y >= SPLIT_Y ? wingColours.includes(phys) : logical === phys;
+  logical === WING_COLOUR && y >= SPLIT_Y ? wingColours.includes(phys) :
+  themed[logical] ? themed[logical].includes(phys) : logical === phys;
 
 // ------------------------------------------------------------------ emulator
 const DISC = path.join(ROOT, "galaxa.ssd");
@@ -196,7 +201,7 @@ function snapshot() {
     diver_slot: rb(zp.diver_slot), wings, boss_x: rb(zp.boss_x), boss_y: rb(zp.boss_y),
     lead_gone: rb(zp.lead_gone), intro: rb(labels.intro), level: rb(labels.level),
     dive_delay: rb(labels.dive_delays + rb(labels.level)), // the last level's shrinks each wave past it
-    alive_count: rb(zp.alive_count), diver_vx: rb(labels.diver_vx),
+    alive_count: rb(zp.alive_count), progress: rb(zp.progress), diver_vx: rb(labels.diver_vx),
     rowX, rowY, rowAnim, rowBofs, alive, lives: rb(labels.lives), stars,
     ships_shown: rb(labels.ships_shown), player_state: rb(labels.player_state), player_row: rb(labels.player_row),
     score: bcd(rb(labels.score_hi)) * 1000 + bcd(rb(labels.score_lo)) * 10, wave: bcd(rb(labels.wave)),
@@ -291,9 +296,10 @@ const signedTable = (base) => [...Array((BREATH_STEPS + 1) * FORM_COLS)].map((_,
 const breath = signedTable(labels.breath);
 const vbreath = signedTable(labels.vbreath);
 const slotPx = [...Array(FORM_ROWS * FORM_COLS)].map((_, k) => m.readbyte(labels.slot_px + k));
-// each row's outer columns at the start of a wave
+// each row's outer columns at the start of the first wave played: its shape, a row a byte, column 0 in bit 7
+const shape = labels.shapes + 4 * (parseInt(String(START_WAVE), 16) & 3);
 const rowEnds = [...Array(FORM_ROWS)].map((_, r) => {
-  const cols = [...Array(FORM_COLS).keys()].filter((c) => m.readbyte(labels.slot_start + r * FORM_COLS + c));
+  const cols = [...Array(FORM_COLS).keys()].filter((c) => m.readbyte(shape + r) & (128 >> c));
   return [cols[0], cols.at(-1)];
 });
 const levelTable = (name) => [...Array(LEVELS)].map((_, k) => m.readbyte(labels[name] + k));
@@ -322,9 +328,9 @@ const slotX = (ram, i) => {
   return ram.rowX[r] + slotPx[i] + breath[ram.rowBofs[r] + c];
 };
 const slotY = (ram, i) => (i === BOSS_SLOT ? ram.rowY[0] + vbreath[ram.rowBofs[0] + FORM_ROWS] : ram.rowY[Math.floor(i / FORM_COLS)]);
-// A sprite's blank pixels may show a star: white, where RAM puts a shown star.
+// A sprite's blank pixels may show a star: STAR_PHYS, where RAM puts a shown star.
 let starAt = new Uint8Array(160 * 256);
-const pixelOk = (logical, g, k) => shows(logical, g[k], Math.floor(k / 160)) || (logical === 0 && g[k] === 7 && starAt[k]);
+const pixelOk = (logical, g, k) => shows(logical, g[k], Math.floor(k / 160)) || (logical === 0 && g[k] === STAR_PHYS && starAt[k]);
 function matchAt(g, t, x, y) {
   for (let r = 0; r < t.rows.length; r++)
     for (let c = 0; c < t.w; c++) if (!pixelOk(t.rows[r][c], g, (y + r) * 160 + x + c)) return false;
@@ -433,11 +439,18 @@ let flashFrames = 0;
 const blank = new Uint8Array(160 * 256);
 for (let i = 0; i < captured.length; i++) {
   let { grid, ram } = captured[i];
+  themed = {};
+  for (const stage of [(ram.progress & 127) - 1, (ram.progress & 127) - 2]) {
+    for (let j = 0; stage >= 0 && j < 3; j++) {
+      const b = m.readbyte(labels.themes + (stage & 12) + j);
+      (themed[b >> 4] ??= []).push((b & 7) ^ 7);
+    }
+  }
   // a hit ship flashes the background: no sprite can be told from it then
   const flash = grid.subarray(128 * 160, 129 * 160).filter(Boolean).length > 120;
   if (flash) { flashFrames++; grid = blank; }
   const prev = captured[i - 1]?.ram;
-  if (prev && ((ram.frame - prev.frame) & 0xff) !== 1) dropped++, droppedAt.push({ frame: i, intro: ram.intro, diver: ram.diver_state, player: ram.player_state });
+  if (prev && ((ram.frame - prev.frame) & 0xff) !== 1) dropped++, droppedAt.push({ frame: i, intro: ram.intro, diver: ram.diver_state, player: ram.player_state, wave: ram.wave });
   // a new wave redraws the formation at its start position: not a step
   const newWave = prev && ram.alive.filter(Boolean).length > prev.alive.filter(Boolean).length;
   if (newWave) waves++;
@@ -534,7 +547,7 @@ for (let i = 0; i < captured.length; i++) {
   for (let y = 8; y < 256; y++)
     for (let x = 0; x < 160; x++) {
       const k = y * 160 + x;
-      if (!grid[k] || covered[k] || (grid[k] === 7 && starAt[k])) continue;
+      if (!grid[k] || covered[k] || (grid[k] === STAR_PHYS && starAt[k])) continue;
       if (zones.some((z) => x >= z.x0 && x < z.x1 && y >= z.y0 && y < z.y1)) continue;
       // the banner, and a bullet part way across its edge, which EOR leaves matching nothing
       if ([ram, prev].some((q) => q?.intro === 1) && y >= BANNER_Y - 4 && y < BANNER_Y + 12) continue;
@@ -596,7 +609,7 @@ for (let i = 0; i < captured.length; i++) {
       else if (prev.bonus_on && !ram.bonus_on && prev.power === 1) rapidEv.capsuleGrants++;
       else rapidEv.wrongGrants++;
     }
-    if (prev.power === 2 && ram.power === 1) rapidEv.stepDowns++;
+    if (prev.power === 2 && ram.power === 1 && ram.player_state !== 1) rapidEv.stepDowns++;   // a ship lost takes a level
     if (prev.intro && !ram.intro && ram.power === 2) rapidEv.keptIntoStage++;
   }
   // falling: bonus_on 1 and 3 by turns (2 is its first frame)
@@ -954,7 +967,7 @@ const checks = {
   "the capsule falls 1.5px per frame": report.bonus.steps[1] > 0 && report.bonus.steps[2] > 0 &&
     only(report.bonus.steps, (d) => d === 1 || d === 2) &&
     Math.abs(report.bonus.steps[1] - report.bonus.steps[2]) <= Math.max(4, (report.bonus.steps[1] + report.bonus.steps[2]) / 10),
-  "single shot until the capsule is caught, double until a ship is lost, across stages": (bonusEv.catches === 0 || bonusEv.doubleShots > 0) &&
+  "single shot until the capsule is caught, a level lost only with a ship, across stages": (bonusEv.catches === 0 || bonusEv.doubleShots > 0) &&
     bonusEv.secondWithoutPower === 0 && bonusEv.lostWithoutHit === 0 && bonusEv.stageResets === 0,
   "a third shot only with rapid fire, given only for a capsule caught with the double shot, kept across stages":
     (rapidPoke == null || rapidEv.thirdShots > 0) && rapidEv.thirdWithoutRapid.length === 0 && rapidEv.wrongGrants === 0 && rapidEv.stepDowns === 0,

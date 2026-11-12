@@ -20,7 +20,7 @@ run: $(OUT)
 	fi
 	@open $(JSBEEB_URL)
 
-# P cycles the power level: single shot, double, rapid fire
+# P cycles the power level: single shot, double, rapid fire. A hit ship comes back: lives never run out
 galaxa-debug.ssd: $(SRC) title.asm !BOOT
 	$(BEEBASM) -i $(SRC) -D DEBUG=1 -do $@ -opt 3 -v -d -title GALAXA -labels galaxa-debug.sym > galaxa-debug.lst
 

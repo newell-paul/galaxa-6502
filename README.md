@@ -25,13 +25,17 @@ use Share → Add to Home Screen instead: it opens from there with no browser ba
 
 - Aliens wait in formation and peel off to dive at you. The boss dives with two guards.
 - Shoot the boss and it drops a **P** capsule. Catch it to power up: double shot, then
-  rapid fire. Your ship's wings show the level (cyan, yellow, red). You keep it until you
-  lose a ship.
+  rapid fire. Your ship's wings show the level (cyan, yellow, red). Losing a ship
+  costs one level.
 - Hits on a falling capsule score too, and pay more as the game goes on, so with rapid fire
   it pays to shoot the boss high up and keep the capsule in the air.
 - Each stage dives sooner and fires more, up to stage 8; after that the dives keep
   coming a frame sooner each stage.
+- The formation changes shape from stage to stage, four shapes by turns.
+- Every four stages the aliens change colour.
 - Three ships. Each new stage adds a bonus.
+- A score in the top five asks for three initials on the title screen: A to Z, DELETE to step back.
+- Passing the top score plays a fanfare. The browser version keeps the score table between visits.
 - The boss is worth the most and the rows score less going down. Diving aliens score more,
   and shooting a whole swoop earns a bonus and a jingle.
 
